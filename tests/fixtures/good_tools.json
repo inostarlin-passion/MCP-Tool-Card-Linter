@@ -1,0 +1,51 @@
+{
+  "tools": [
+    {
+      "name": "search_customer_orders",
+      "description": "Search customer orders by customer email, customer ID, or order status. Use for read-only order lookup and do not use it to modify orders or payments.",
+      "annotations": {
+        "readOnlyHint": true
+      },
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "customer_id": {
+            "type": "string",
+            "description": "Internal customer ID, if known",
+            "maxLength": 64
+          },
+          "email": {
+            "type": "string",
+            "description": "Customer email address",
+            "maxLength": 254
+          },
+          "status": {
+            "type": "string",
+            "description": "Optional order status filter",
+            "enum": ["pending", "paid", "shipped", "cancelled"]
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "orders": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "order_id": { "type": "string" },
+                "status": { "type": "string" }
+              }
+            }
+          }
+        },
+        "required": ["orders"],
+        "additionalProperties": false
+      }
+    }
+  ]
+}
+

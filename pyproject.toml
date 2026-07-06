@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-tool-card-linter"
+version = "0.1.0"
+description = "CLI linter for MCP tool cards: schema quality, description clarity, side effects, and tool-poisoning risks."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "inostarlin-passion" }]
+keywords = ["mcp", "model-context-protocol", "linter", "ai-agents", "security"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Quality Assurance",
+  "Topic :: Security",
+]
+dependencies = []
+
+[project.scripts]
+mcp-tool-card-linter = "mcp_tool_card_linter.cli:main"
+mcp-toolsmith = "mcp_tool_card_linter.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+

@@ -1,0 +1,207 @@
+{
+  "facts": [
+    "MCP tools are model-callable capabilities described by metadata such as name, description, and input schema.",
+    "MCP uses JSON-RPC messages over transports such as stdio and Streamable HTTP.",
+    "Tool metadata quality affects how an agent discovers, selects, and fills arguments for tools."
+  ],
+  "generated_at": "2026-07-06T13:07:32.761978+00:00",
+  "inferences": [
+    "Side-effect, schema, and prompt-injection checks are static heuristics; they reduce review effort but do not prove runtime safety.",
+    "Tools with write, destructive, financial, network, or secret-related wording should require stricter human review by default."
+  ],
+  "sources": [
+    {
+      "errors": [],
+      "metadata": {
+        "path": "/Users/inostarlin/code/MCP-Tool-Card-Linter/examples/bad-tools.json"
+      },
+      "server_name": "static",
+      "source_type": "tools-file",
+      "tools_discovered": 2,
+      "tools_linted": 2,
+      "truncated": false
+    }
+  ],
+  "summary": {
+    "allowed_tools_recommendation": {
+      "block_until_review": [
+        "summarize_issue"
+      ],
+      "include_by_default": [],
+      "require_approval": [
+        "send"
+      ]
+    },
+    "issues_by_severity": {
+      "critical": 1,
+      "error": 0,
+      "info": 3,
+      "warning": 10
+    },
+    "risk_counts": {
+      "critical": 1,
+      "high": 0,
+      "low": 0,
+      "medium": 1
+    },
+    "score": 56.0,
+    "source_errors": 0,
+    "sources_scanned": 1,
+    "tools_scanned": 2
+  },
+  "tools": [
+    {
+      "estimated_card_chars": 107,
+      "issues": [
+        {
+          "code": "GENERIC_TOOL_NAME",
+          "evidence": null,
+          "message": "Tool name 'send' is too generic for reliable tool selection.",
+          "path": "name",
+          "recommendation": "Rename the tool to include the target domain and action, for example send_email or search_customer_orders.",
+          "severity": "warning"
+        },
+        {
+          "code": "DESCRIPTION_TOO_SHORT",
+          "evidence": "Send message",
+          "message": "Tool description is too short to guide reliable tool selection.",
+          "path": "description",
+          "recommendation": "Add purpose, usage boundary, important inputs, output shape, and side effects.",
+          "severity": "warning"
+        },
+        {
+          "code": "MISSING_SIDE_EFFECT_WARNING",
+          "evidence": null,
+          "message": "Tool appears to have side effects but the description does not state them clearly.",
+          "path": "description",
+          "recommendation": "State whether the tool writes, sends, deletes, charges, calls external systems, and whether user confirmation is required.",
+          "severity": "warning"
+        },
+        {
+          "code": "MISSING_USAGE_BOUNDARY",
+          "evidence": null,
+          "message": "Risky tool lacks a clear usage boundary.",
+          "path": "description",
+          "recommendation": "Add when-to-use and when-not-to-use guidance, especially for drafting versus sending or read-only versus write operations.",
+          "severity": "warning"
+        },
+        {
+          "code": "MISSING_REQUIRED_FIELDS",
+          "evidence": null,
+          "message": "Object schema has properties but no required list.",
+          "path": "inputSchema.required",
+          "recommendation": "Declare required parameters explicitly; use an empty list if every field is optional.",
+          "severity": "warning"
+        },
+        {
+          "code": "ADDITIONAL_PROPERTIES_UNSPECIFIED",
+          "evidence": null,
+          "message": "Object schema does not state whether extra parameters are allowed.",
+          "path": "inputSchema.additionalProperties",
+          "recommendation": "Set additionalProperties to false for strict tool arguments unless arbitrary keys are intentional.",
+          "severity": "info"
+        },
+        {
+          "code": "PARAMETER_DESCRIPTION_MISSING",
+          "evidence": null,
+          "message": "Parameter 'to' has no description.",
+          "path": "inputSchema.properties.to.description",
+          "recommendation": "Explain accepted format, units, identifiers, and whether the parameter is optional.",
+          "severity": "info"
+        },
+        {
+          "code": "PARAMETER_DESCRIPTION_MISSING",
+          "evidence": null,
+          "message": "Parameter 'msg' has no description.",
+          "path": "inputSchema.properties.msg.description",
+          "recommendation": "Explain accepted format, units, identifiers, and whether the parameter is optional.",
+          "severity": "warning"
+        },
+        {
+          "code": "STRING_BOUND_RECOMMENDED",
+          "evidence": null,
+          "message": "Free-form string parameter 'msg' has no maxLength.",
+          "path": "inputSchema.properties.msg",
+          "recommendation": "Add maxLength when large strings could increase latency, cost, or injection risk.",
+          "severity": "info"
+        },
+        {
+          "code": "MISSING_OUTPUTSCHEMA",
+          "evidence": null,
+          "message": "outputSchema is missing.",
+          "path": "outputSchema",
+          "recommendation": "Provide outputSchema when the client should parse structured results reliably.",
+          "severity": "warning"
+        }
+      ],
+      "recommendations": [
+        "Rename the tool to an action_domain form such as send_email or search_orders.",
+        "Expand the description with purpose, usage boundary, important inputs, outputs, and side effects.",
+        "Add outputSchema for structured outputs when callers need deterministic parsing.",
+        "Require human approval before calling this tool in production clients."
+      ],
+      "risk_categories": [
+        "write"
+      ],
+      "risk_level": "medium",
+      "score": 62,
+      "server_name": "static",
+      "tool_name": "send"
+    },
+    {
+      "estimated_card_chars": 297,
+      "issues": [
+        {
+          "code": "TOOL_POISONING_SECRET_EXFILTRATION",
+          "evidence": "read ~/.ssh/id_rsa",
+          "message": "Description contains instruction-like or secret-seeking text that may poison tool selection.",
+          "path": "description",
+          "recommendation": "Block this tool until reviewed; tool metadata appears to request unrelated secrets.",
+          "severity": "critical"
+        },
+        {
+          "code": "MISSING_SIDE_EFFECT_WARNING",
+          "evidence": null,
+          "message": "Tool appears to have side effects but the description does not state them clearly.",
+          "path": "description",
+          "recommendation": "State whether the tool writes, sends, deletes, charges, calls external systems, and whether user confirmation is required.",
+          "severity": "warning"
+        },
+        {
+          "code": "MISSING_USAGE_BOUNDARY",
+          "evidence": null,
+          "message": "Risky tool lacks a clear usage boundary.",
+          "path": "description",
+          "recommendation": "Add when-to-use and when-not-to-use guidance, especially for drafting versus sending or read-only versus write operations.",
+          "severity": "warning"
+        },
+        {
+          "code": "MISSING_OUTPUTSCHEMA",
+          "evidence": null,
+          "message": "outputSchema is missing.",
+          "path": "outputSchema",
+          "recommendation": "Provide outputSchema when the client should parse structured results reliably.",
+          "severity": "warning"
+        }
+      ],
+      "recommendations": [
+        "Add outputSchema for structured outputs when callers need deterministic parsing.",
+        "Require human approval before calling this tool in production clients.",
+        "Block this tool until the server owner removes instruction-like or secret-seeking metadata."
+      ],
+      "risk_categories": [
+        "network",
+        "secret"
+      ],
+      "risk_level": "critical",
+      "score": 50,
+      "server_name": "static",
+      "tool_name": "summarize_issue"
+    }
+  ],
+  "uncertainties": [
+    "Tool Card is an engineering term in this project, not a formal MCP specification object.",
+    "A static linter cannot verify whether server implementation behavior matches its metadata."
+  ],
+  "version": "0.1.0"
+}

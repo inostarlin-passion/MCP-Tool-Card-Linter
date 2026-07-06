@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "mock": {
+      "command": "python3",
+      "args": ["tests/fixtures/mock_mcp_stdio_server.py"]
+    }
+  }
+}
+
