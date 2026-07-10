@@ -4,7 +4,7 @@
     "MCP uses JSON-RPC messages over transports such as stdio and Streamable HTTP.",
     "Tool metadata quality affects how an agent discovers, selects, and fills arguments for tools."
   ],
-  "generated_at": "2026-07-06T13:07:32.761978+00:00",
+  "generated_at": "2026-07-10T04:39:25.938754+00:00",
   "inferences": [
     "Side-effect, schema, and prompt-injection checks are static heuristics; they reduce review effort but do not prove runtime safety.",
     "Tools with write, destructive, financial, network, or secret-related wording should require stricter human review by default."
@@ -32,11 +32,18 @@
         "send"
       ]
     },
+    "baseline": {
+      "changed": 0,
+      "checked": false,
+      "missing": 0,
+      "new": 0,
+      "unchanged": 0
+    },
     "issues_by_severity": {
       "critical": 1,
       "error": 0,
-      "info": 3,
-      "warning": 10
+      "info": 4,
+      "warning": 12
     },
     "risk_counts": {
       "critical": 1,
@@ -44,14 +51,16 @@
       "low": 0,
       "medium": 1
     },
-    "score": 56.0,
+    "score": 50.5,
     "source_errors": 0,
     "sources_scanned": 1,
     "tools_scanned": 2
   },
   "tools": [
     {
-      "estimated_card_chars": 107,
+      "baseline_status": "not_checked",
+      "card_fingerprint": "sha256:55775a2a0e3403cc1e377112e224a32a6f1e6a68d632b02bc53b5492c3e0e53f",
+      "estimated_card_chars": 138,
       "issues": [
         {
           "code": "GENERIC_TOOL_NAME",
@@ -99,7 +108,7 @@
           "message": "Object schema does not state whether extra parameters are allowed.",
           "path": "inputSchema.additionalProperties",
           "recommendation": "Set additionalProperties to false for strict tool arguments unless arbitrary keys are intentional.",
-          "severity": "info"
+          "severity": "warning"
         },
         {
           "code": "PARAMETER_DESCRIPTION_MISSING",
@@ -107,6 +116,14 @@
           "message": "Parameter 'to' has no description.",
           "path": "inputSchema.properties.to.description",
           "recommendation": "Explain accepted format, units, identifiers, and whether the parameter is optional.",
+          "severity": "info"
+        },
+        {
+          "code": "STRING_BOUND_RECOMMENDED",
+          "evidence": null,
+          "message": "Free-form string parameter 'to' has no maxLength.",
+          "path": "inputSchema.properties.to",
+          "recommendation": "Add maxLength when large strings could increase latency, cost, or injection risk.",
           "severity": "info"
         },
         {
@@ -144,21 +161,15 @@
         "write"
       ],
       "risk_level": "medium",
-      "score": 62,
+      "score": 57,
       "server_name": "static",
       "tool_name": "send"
     },
     {
-      "estimated_card_chars": 297,
+      "baseline_status": "not_checked",
+      "card_fingerprint": "sha256:993476025cf09f497da264aac7eff74ce59b43e466f0945de4092959307dbffb",
+      "estimated_card_chars": 325,
       "issues": [
-        {
-          "code": "TOOL_POISONING_SECRET_EXFILTRATION",
-          "evidence": "read ~/.ssh/id_rsa",
-          "message": "Description contains instruction-like or secret-seeking text that may poison tool selection.",
-          "path": "description",
-          "recommendation": "Block this tool until reviewed; tool metadata appears to request unrelated secrets.",
-          "severity": "critical"
-        },
         {
           "code": "MISSING_SIDE_EFFECT_WARNING",
           "evidence": null,
@@ -176,6 +187,30 @@
           "severity": "warning"
         },
         {
+          "code": "TOOL_POISONING_SECRET_EXFILTRATION",
+          "evidence": "read ~/.ssh/id_rsa",
+          "message": "Model-visible metadata contains instruction-like or secret-seeking text that may poison tool selection.",
+          "path": "description",
+          "recommendation": "Block this tool until reviewed; tool metadata appears to request unrelated secrets.",
+          "severity": "critical"
+        },
+        {
+          "code": "STRING_BOUND_RECOMMENDED",
+          "evidence": null,
+          "message": "Free-form string parameter 'issue_url' has no maxLength.",
+          "path": "inputSchema.properties.issue_url",
+          "recommendation": "Add maxLength when large strings could increase latency, cost, or injection risk.",
+          "severity": "info"
+        },
+        {
+          "code": "URL_PARAMETER_ALLOWLIST_MISSING",
+          "evidence": null,
+          "message": "URL-like parameter 'issue_url' has no allowlist constraint.",
+          "path": "inputSchema.properties.issue_url",
+          "recommendation": "Constrain schemes and destinations with an allowlist and enforce SSRF protections server-side; format alone is not an allowlist.",
+          "severity": "warning"
+        },
+        {
           "code": "MISSING_OUTPUTSCHEMA",
           "evidence": null,
           "message": "outputSchema is missing.",
@@ -187,14 +222,15 @@
       "recommendations": [
         "Add outputSchema for structured outputs when callers need deterministic parsing.",
         "Require human approval before calling this tool in production clients.",
-        "Block this tool until the server owner removes instruction-like or secret-seeking metadata."
+        "Block this tool until the server owner removes instruction-like or secret-seeking metadata.",
+        "Replace dangerous free-form inputs with bounded structured values and enforce the same policy server-side."
       ],
       "risk_categories": [
         "network",
         "secret"
       ],
       "risk_level": "critical",
-      "score": 50,
+      "score": 44,
       "server_name": "static",
       "tool_name": "summarize_issue"
     }
@@ -203,5 +239,5 @@
     "Tool Card is an engineering term in this project, not a formal MCP specification object.",
     "A static linter cannot verify whether server implementation behavior matches its metadata."
   ],
-  "version": "0.1.0"
+  "version": "0.2.0"
 }

@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
+import math
 import re
 from collections import Counter, defaultdict
 from datetime import UTC, datetime
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator, Mapping
 
 from . import __version__
 from .models import (
     Issue,
+    BaselineStatus,
     LintConfig,
     LintReport,
     SEVERITY_WEIGHTS,
@@ -15,6 +20,7 @@ from .models import (
     ToolCard,
     ToolReport,
 )
+from .security import safe_log_text
 
 GENERIC_TOOL_NAMES = {
     "run",
@@ -50,6 +56,35 @@ AMBIGUOUS_PARAM_NAMES = {
     "name",
     "type",
 }
+
+COMMAND_PARAM_TERMS = re.compile(
+    r"(?:^|_)(?:cmd|command|shell|script|code|sql|expression|executable)(?:_|$)",
+    re.IGNORECASE,
+)
+URL_PARAM_TERMS = re.compile(
+    r"(?:^|_)(?:url|uri|endpoint|webhook|callback|redirect)(?:_|$)",
+    re.IGNORECASE,
+)
+PATH_PARAM_TERMS = re.compile(
+    r"(?:^|_)(?:path|file|filename|directory|folder|cwd)(?:_|$)",
+    re.IGNORECASE,
+)
+SECRET_PARAM_TERMS = re.compile(
+    r"(?:^|_)(?:secret|token|password|passwd|credential|api_key|private_key)(?:_|$)",
+    re.IGNORECASE,
+)
+HIDDEN_UNICODE = re.compile("[\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]")
+LONG_ENCODED_BLOB = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{120,}={0,2}(?![A-Za-z0-9+/])")
+CREDENTIAL_LITERAL = re.compile(
+    r"\b(?:AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,})\b"
+)
+MAX_METADATA_SECURITY_FINDINGS = 64
+MAX_METADATA_SCAN_CHARS = 2_000_000
+PERMISSIVE_PATTERNS = {".*", "^.*$", ".+", "^.+$", "[\\s\\S]*", "^[\\s\\S]*$"}
+NESTED_REGEX_QUANTIFIER = re.compile(
+    r"\((?:[^()\\]|\\.)*(?:\*|\+|\{\d+,?\d*\})(?:[^()\\]|\\.)*\)"
+    r"(?:\*|\+|\{\d+,?\d*\})"
+)
 
 SIDE_EFFECT_TERMS = re.compile(
     r"\b(confirm|confirmation|approval|irreversible|permanent(?:ly)?|"
@@ -90,6 +125,10 @@ RISK_PATTERNS: dict[str, re.Pattern[str]] = {
         r"\b(file|path|directory|folder|filesystem|fs|read_file|write_file)\b",
         re.IGNORECASE,
     ),
+    "code_execution": re.compile(
+        r"\b(shell|command|script|execute code|eval|sql|subprocess|terminal)\b",
+        re.IGNORECASE,
+    ),
 }
 
 TOOL_POISONING_PATTERNS: tuple[tuple[str, str, re.Pattern[str], str], ...] = (
@@ -124,6 +163,16 @@ TOOL_POISONING_PATTERNS: tuple[tuple[str, str, re.Pattern[str], str], ...] = (
         ),
         "Remove hidden or role-like instructions from descriptions and keep security-sensitive guidance outside model-visible tool cards.",
     ),
+    (
+        "TOOL_POISONING_TOOL_COERCION",
+        "error",
+        re.compile(
+            r"\b(always|must|mandatory|before (?:answering|responding)|first)\b.{0,100}"
+            r"\b(call|invoke|use|execute)\b.{0,80}\b(tool|function|command)\b",
+            re.IGNORECASE | re.DOTALL,
+        ),
+        "Remove instructions that coerce unrelated tool calls; describe capability and usage boundaries instead.",
+    ),
 )
 
 FACTS = [
@@ -143,29 +192,63 @@ UNCERTAINTIES = [
 ]
 
 
-def lint_sources(sources: Iterable[SourceResult], config: LintConfig) -> LintReport:
+def lint_sources(
+    sources: Iterable[SourceResult],
+    config: LintConfig,
+    *,
+    baseline_fingerprints: Mapping[tuple[str, str], str] | None = None,
+) -> LintReport:
     source_list = list(sources)
     tool_reports: list[ToolReport] = []
     source_summaries: list[dict[str, Any]] = []
 
+    bounded_by_source = {
+        id(source): source.tools[: config.max_tools] for source in source_list
+    }
+    servers_by_tool_name: dict[str, set[str]] = defaultdict(set)
     for source in source_list:
-        bounded_tools = source.tools[: config.max_tools]
+        for tool in bounded_by_source[id(source)]:
+            if not tool.name.startswith("<unnamed-"):
+                servers_by_tool_name[tool.name].add(source.server_name)
+    cross_server_names = {
+        name for name, server_names in servers_by_tool_name.items() if len(server_names) > 1
+    }
+
+    for source in source_list:
+        bounded_tools = bounded_by_source[id(source)]
+        discovered_tools = (
+            source.discovered_tools
+            if source.discovered_tools is not None
+            else len(source.tools)
+        )
         duplicate_names = _duplicate_names(bounded_tools)
         for tool in bounded_tools:
-            tool_reports.append(_lint_tool(tool, duplicate_names, config))
+            tool_reports.append(
+                _lint_tool(
+                    tool,
+                    duplicate_names,
+                    cross_server_names,
+                    config,
+                    baseline_fingerprints,
+                )
+            )
         source_summaries.append(
             {
                 "server_name": source.server_name,
                 "source_type": source.source_type,
-                "tools_discovered": len(source.tools),
+                "tools_discovered": discovered_tools,
                 "tools_linted": len(bounded_tools),
-                "truncated": len(source.tools) > len(bounded_tools),
+                "truncated": discovered_tools > len(bounded_tools),
                 "errors": source.errors,
                 "metadata": source.metadata,
             }
         )
 
-    summary = _summarize(source_summaries, tool_reports)
+    summary = _summarize(
+        source_summaries,
+        tool_reports,
+        baseline_fingerprints=baseline_fingerprints,
+    )
     return LintReport(
         generated_at=datetime.now(UTC).isoformat(),
         version=__version__,
@@ -179,19 +262,58 @@ def lint_sources(sources: Iterable[SourceResult], config: LintConfig) -> LintRep
 
 
 def _lint_tool(
-    tool: ToolCard, duplicate_names: set[str], config: LintConfig
+    tool: ToolCard,
+    duplicate_names: set[str],
+    cross_server_names: set[str],
+    config: LintConfig,
+    baseline_fingerprints: Mapping[tuple[str, str], str] | None,
 ) -> ToolReport:
     issues: list[Issue] = []
-    text_blob = " ".join(
-        value
-        for value in [tool.name, tool.description or ""]
-        if isinstance(value, str)
-    )
+    report_server_name = safe_log_text(tool.server_name, limit=512)
+    report_tool_name = safe_log_text(tool.display_name, limit=512)
+    canonical_card = _canonical_card_text(tool)
+    estimated_card_chars = len(canonical_card)
+    metadata_entries = list(_iter_model_visible_strings(tool.raw, config))
+    text_blob = " ".join([tool.name, tool.description or "", *(value for _, value in metadata_entries)])
     risk_categories = _risk_categories(tool, text_blob)
 
+    fingerprint = _card_fingerprint(canonical_card)
+    baseline_status: BaselineStatus = "not_checked"
+    if baseline_fingerprints is not None:
+        expected = baseline_fingerprints.get((report_server_name, report_tool_name))
+        if expected is None:
+            baseline_status = "new"
+            issues.append(
+                Issue(
+                    code="TOOL_CARD_NOT_IN_BASELINE",
+                    severity="info",
+                    path="$",
+                    message="Tool card is new relative to the supplied baseline.",
+                    recommendation="Review and approve the new tool before updating the trusted baseline.",
+                )
+            )
+        elif isinstance(expected, str) and hmac.compare_digest(expected, fingerprint):
+            baseline_status = "unchanged"
+        else:
+            baseline_status = "changed"
+            risk_categories.add("integrity")
+            issues.append(
+                Issue(
+                    code="TOOL_CARD_CHANGED",
+                    severity="error",
+                    path="$",
+                    message="Tool metadata changed relative to the supplied baseline.",
+                    recommendation="Treat this as a possible rug pull: review the diff and re-approve before updating the baseline.",
+                    evidence=f"expected={str(expected)[:80]} current={fingerprint}",
+                )
+            )
+    if tool.name in cross_server_names:
+        risk_categories.add("shadowing")
+
     _check_raw_shape(tool, issues)
-    _check_name(tool, duplicate_names, issues)
+    _check_name(tool, duplicate_names, cross_server_names, issues)
     _check_description(tool, risk_categories, config, issues)
+    _check_metadata_security(metadata_entries, issues)
     _check_schema(
         tool.input_schema,
         "inputSchema",
@@ -209,18 +331,20 @@ def _lint_tool(
         check_parameter_quality=False,
     )
     _check_annotations(tool, risk_categories, issues)
-    _check_card_size(tool, config, issues)
+    _check_card_size(estimated_card_chars, config, issues)
 
     risk_level = _risk_level(risk_categories, issues)
     recommendations = _recommendations(tool, risk_categories, issues)
     score = _score(issues)
     return ToolReport(
-        server_name=tool.server_name,
-        tool_name=tool.display_name,
+        server_name=report_server_name,
+        tool_name=report_tool_name,
         score=score,
         risk_level=risk_level,
         risk_categories=sorted(risk_categories),
-        estimated_card_chars=_estimate_card_chars(tool),
+        estimated_card_chars=estimated_card_chars,
+        card_fingerprint=fingerprint,
+        baseline_status=baseline_status,
         issues=issues,
         recommendations=recommendations,
     )
@@ -237,10 +361,68 @@ def _check_raw_shape(tool: ToolCard, issues: list[Issue]) -> None:
                 recommendation="Return each tool as an object with name, description, inputSchema, and optional outputSchema.",
             )
         )
+        return
+
+    raw = tool.raw
+    if "name" in raw and not isinstance(raw["name"], str):
+        issues.append(
+            Issue(
+                code="INVALID_TOOL_NAME_TYPE",
+                severity="critical",
+                path="name",
+                message="Tool name must be a string.",
+                recommendation="Return a non-empty string name that is stable and unique.",
+            )
+        )
+    if "description" in raw and not isinstance(raw["description"], str):
+        issues.append(
+            Issue(
+                code="INVALID_DESCRIPTION_TYPE",
+                severity="error",
+                path="description",
+                message="Tool description must be a string.",
+                recommendation="Return model-visible descriptions as bounded UTF-8 strings.",
+            )
+        )
+    for canonical, alias in (("inputSchema", "input_schema"), ("outputSchema", "output_schema")):
+        key = canonical if canonical in raw else alias if alias in raw else None
+        if key is not None and not isinstance(raw[key], dict):
+            issues.append(
+                Issue(
+                    code=f"INVALID_{canonical.upper()}_TYPE",
+                    severity="error",
+                    path=key,
+                    message=f"{canonical} must be a JSON object.",
+                    recommendation="Publish a JSON Schema object rather than a scalar or array.",
+                )
+            )
+    if "annotations" in raw and not isinstance(raw["annotations"], dict):
+        issues.append(
+            Issue(
+                code="INVALID_ANNOTATIONS_TYPE",
+                severity="error",
+                path="annotations",
+                message="Tool annotations must be an object.",
+                recommendation="Return annotation hints in an object with boolean hint values.",
+            )
+        )
+    if "title" in raw and not isinstance(raw["title"], str):
+        issues.append(
+            Issue(
+                code="INVALID_TITLE_TYPE",
+                severity="warning",
+                path="title",
+                message="Tool title must be a string.",
+                recommendation="Use a short human-readable title or omit it.",
+            )
+        )
 
 
 def _check_name(
-    tool: ToolCard, duplicate_names: set[str], issues: list[Issue]
+    tool: ToolCard,
+    duplicate_names: set[str],
+    cross_server_names: set[str],
+    issues: list[Issue],
 ) -> None:
     name = tool.name
     if name.startswith("<unnamed-"):
@@ -301,6 +483,17 @@ def _check_name(
             )
         )
 
+    if name in cross_server_names:
+        issues.append(
+            Issue(
+                code="CROSS_SERVER_TOOL_SHADOWING",
+                severity="warning",
+                path="name",
+                message=f"Tool name '{name}' is exposed by more than one server.",
+                recommendation="Use server-qualified policy identities and review descriptions for cross-server shadowing or escalation instructions.",
+            )
+        )
+
 
 def _check_description(
     tool: ToolCard,
@@ -357,20 +550,6 @@ def _check_description(
             )
         )
 
-    for code, severity, pattern, recommendation in TOOL_POISONING_PATTERNS:
-        match = pattern.search(desc)
-        if match:
-            issues.append(
-                Issue(
-                    code=code,
-                    severity=severity,  # type: ignore[arg-type]
-                    path="description",
-                    message="Description contains instruction-like or secret-seeking text that may poison tool selection.",
-                    recommendation=recommendation,
-                    evidence=_trim(match.group(0)),
-                )
-            )
-
     if _is_side_effect_risk(risk_categories) and not SIDE_EFFECT_TERMS.search(desc):
         severity = "error" if {"destructive", "financial"} & risk_categories else "warning"
         issues.append(
@@ -393,6 +572,126 @@ def _check_description(
                 recommendation="Add when-to-use and when-not-to-use guidance, especially for drafting versus sending or read-only versus write operations.",
             )
         )
+
+
+def _iter_model_visible_strings(
+    raw: dict[str, Any], config: LintConfig
+) -> Iterator[tuple[str, str]]:
+    roots = []
+    for key in (
+        "name",
+        "title",
+        "description",
+        "inputSchema",
+        "input_schema",
+        "outputSchema",
+        "output_schema",
+        "annotations",
+        "execution",
+        "_meta",
+    ):
+        if key in raw:
+            roots.append((key, raw[key], 0))
+
+    stack = list(reversed(roots))
+    seen_containers: set[int] = set()
+    nodes = 0
+    characters = 0
+    node_limit = min(100_000, max(100, config.max_schema_properties * 2))
+    while stack and nodes < node_limit and characters < MAX_METADATA_SCAN_CHARS:
+        path, value, depth = stack.pop()
+        nodes += 1
+        if isinstance(value, str):
+            remaining = MAX_METADATA_SCAN_CHARS - characters
+            bounded = value[:remaining]
+            characters += len(bounded)
+            yield path, bounded
+            continue
+        if depth > config.max_schema_depth + 2:
+            continue
+        if isinstance(value, dict):
+            identity = id(value)
+            if identity in seen_containers:
+                continue
+            seen_containers.add(identity)
+            entries = list(value.items())
+            for key, child in reversed(entries):
+                child_path = f"{path}.{key}"
+                # Property names and annotation keys are model-visible attack surface too.
+                yield f"{child_path}#key", str(key)
+                stack.append((child_path, child, depth + 1))
+        elif isinstance(value, list):
+            identity = id(value)
+            if identity in seen_containers:
+                continue
+            seen_containers.add(identity)
+            for index in range(len(value) - 1, -1, -1):
+                stack.append((f"{path}[{index}]", value[index], depth + 1))
+
+
+def _check_metadata_security(
+    entries: list[tuple[str, str]], issues: list[Issue]
+) -> None:
+    findings = 0
+    seen: set[tuple[str, str]] = set()
+    for path, value in entries:
+        if findings >= MAX_METADATA_SECURITY_FINDINGS:
+            break
+        if HIDDEN_UNICODE.search(value) and ("HIDDEN_UNICODE_CONTROL", path) not in seen:
+            seen.add(("HIDDEN_UNICODE_CONTROL", path))
+            issues.append(
+                Issue(
+                    code="HIDDEN_UNICODE_CONTROL",
+                    severity="error",
+                    path=path,
+                    message="Model-visible metadata contains hidden or bidirectional Unicode controls.",
+                    recommendation="Remove zero-width and bidi control characters so reviewers see the same text as the model.",
+                )
+            )
+            findings += 1
+        if CREDENTIAL_LITERAL.search(value) and ("HARDCODED_SECRET_IN_METADATA", path) not in seen:
+            seen.add(("HARDCODED_SECRET_IN_METADATA", path))
+            issues.append(
+                Issue(
+                    code="HARDCODED_SECRET_IN_METADATA",
+                    severity="critical",
+                    path=path,
+                    message="Model-visible metadata appears to contain a live credential.",
+                    recommendation="Revoke the credential, remove it from metadata, and use scoped secret storage.",
+                    evidence="credential-like value redacted",
+                )
+            )
+            findings += 1
+        if LONG_ENCODED_BLOB.search(value) and ("OBFUSCATED_METADATA", path) not in seen:
+            seen.add(("OBFUSCATED_METADATA", path))
+            issues.append(
+                Issue(
+                    code="OBFUSCATED_METADATA",
+                    severity="warning",
+                    path=path,
+                    message="Model-visible metadata contains a long encoded-looking blob.",
+                    recommendation="Remove opaque payloads and keep tool metadata directly reviewable.",
+                )
+            )
+            findings += 1
+        for code, severity, pattern, recommendation in TOOL_POISONING_PATTERNS:
+            match = pattern.search(value)
+            if not match or (code, path) in seen:
+                continue
+            seen.add((code, path))
+            issues.append(
+                Issue(
+                    code=code,
+                    severity=severity,  # type: ignore[arg-type]
+                    path=path,
+                    message="Model-visible metadata contains instruction-like or secret-seeking text that may poison tool selection.",
+                    recommendation=recommendation,
+                    evidence=_trim(match.group(0)),
+                )
+            )
+            findings += 1
+            if findings >= MAX_METADATA_SECURITY_FINDINGS:
+                break
 
 
 def _check_schema(
@@ -433,7 +732,12 @@ def _check_schema(
         )
         return
 
-    state = {"count": 0, "depth_issue": False, "property_limit_issue": False}
+    state = {
+        "count": 0,
+        "depth_issue": False,
+        "property_limit_issue": False,
+        "seen": set(),
+    }
     _walk_schema(
         schema,
         path,
@@ -457,6 +761,8 @@ def _walk_schema(
     check_parameter_quality: bool,
     is_root: bool = False,
 ) -> None:
+    if isinstance(schema, bool):
+        return
     if not isinstance(schema, dict):
         issues.append(
             Issue(
@@ -468,6 +774,11 @@ def _walk_schema(
             )
         )
         return
+
+    identity = id(schema)
+    if identity in state["seen"]:
+        return
+    state["seen"].add(identity)
 
     state["count"] += 1
     if state["count"] > config.max_schema_properties:
@@ -499,6 +810,57 @@ def _walk_schema(
         return
 
     schema_type = schema.get("type")
+    allowed_types = {"null", "boolean", "object", "array", "number", "string", "integer"}
+    schema_types: set[str] = set()
+    if isinstance(schema_type, str):
+        if schema_type in allowed_types:
+            schema_types.add(schema_type)
+        else:
+            issues.append(
+                Issue(
+                    code="INVALID_SCHEMA_TYPE",
+                    severity="error",
+                    path=f"{path}.type",
+                    message=f"Unknown JSON Schema type '{schema_type}'.",
+                    recommendation="Use a standard JSON Schema type.",
+                )
+            )
+    elif isinstance(schema_type, list):
+        if not schema_type or any(
+            not isinstance(item, str) or item not in allowed_types for item in schema_type
+        ):
+            issues.append(
+                Issue(
+                    code="INVALID_SCHEMA_TYPE",
+                    severity="error",
+                    path=f"{path}.type",
+                    message="Schema type arrays must contain one or more unique standard type names.",
+                    recommendation="Remove invalid type names and duplicates.",
+                )
+            )
+        else:
+            schema_types.update(schema_type)
+            if len(schema_types) != len(schema_type):
+                issues.append(
+                    Issue(
+                        code="DUPLICATE_SCHEMA_TYPE",
+                        severity="warning",
+                        path=f"{path}.type",
+                        message="Schema type array contains duplicate entries.",
+                        recommendation="Remove duplicate type names.",
+                    )
+                )
+    elif schema_type is not None:
+        issues.append(
+            Issue(
+                code="INVALID_SCHEMA_TYPE",
+                severity="error",
+                path=f"{path}.type",
+                message="Schema type must be a string or an array of strings.",
+                recommendation="Use a standard JSON Schema type name.",
+            )
+        )
+
     has_composition = any(key in schema for key in ("anyOf", "oneOf", "allOf"))
     if schema_type is None and not has_composition and "$ref" not in schema:
         issues.append(
@@ -511,7 +873,7 @@ def _walk_schema(
             )
         )
 
-    if is_root and schema_type not in (None, "object") and not has_composition:
+    if is_root and schema_type is not None and schema_type != "object" and not has_composition:
         issues.append(
             Issue(
                 code="ROOT_SCHEMA_NOT_OBJECT",
@@ -523,7 +885,57 @@ def _walk_schema(
             )
         )
 
-    if schema_type == "object" or "properties" in schema:
+    schema_uri = schema.get("$schema")
+    if schema_uri is not None:
+        if not isinstance(schema_uri, str):
+            issues.append(
+                Issue(
+                    code="INVALID_SCHEMA_DIALECT",
+                    severity="error",
+                    path=f"{path}.$schema",
+                    message="$schema must be a URI string.",
+                    recommendation="Use the JSON Schema 2020-12 dialect URI or omit it to use the MCP default.",
+                )
+            )
+        elif not is_root:
+            issues.append(
+                Issue(
+                    code="NESTED_SCHEMA_DIALECT",
+                    severity="warning",
+                    path=f"{path}.$schema",
+                    message="$schema appears below the root schema.",
+                    recommendation="Declare the JSON Schema dialect at the root.",
+                )
+            )
+
+    ref = schema.get("$ref")
+    if ref is not None:
+        if not isinstance(ref, str):
+            issues.append(
+                Issue(
+                    code="INVALID_SCHEMA_REF",
+                    severity="error",
+                    path=f"{path}.$ref",
+                    message="$ref must be a string.",
+                    recommendation="Use a local JSON Pointer reference or inline the schema.",
+                )
+            )
+        elif not ref.startswith("#"):
+            issues.append(
+                Issue(
+                    code="EXTERNAL_SCHEMA_REF",
+                    severity="error",
+                    path=f"{path}.$ref",
+                    message="Schema uses a non-local reference that may trigger remote retrieval or inconsistent resolution.",
+                    recommendation="Bundle referenced definitions under $defs and use a local #/$defs/... reference.",
+                    evidence=_trim(ref),
+                )
+            )
+
+    _check_schema_bounds(schema, path, issues)
+    _check_schema_annotation_types(schema, path, issues)
+
+    if "object" in schema_types or schema_type == "object" or "properties" in schema:
         properties = schema.get("properties")
         if properties is None:
             issues.append(
@@ -561,13 +973,35 @@ def _walk_schema(
                 issues.append(
                     Issue(
                         code="ADDITIONAL_PROPERTIES_UNSPECIFIED",
-                        severity="info",
+                        severity="warning" if check_parameter_quality else "info",
                         path=f"{path}.additionalProperties",
                         message="Object schema does not state whether extra parameters are allowed.",
                         recommendation="Set additionalProperties to false for strict tool arguments unless arbitrary keys are intentional.",
                     )
                 )
             for prop_name, prop_schema in properties.items():
+                if not isinstance(prop_name, str):
+                    issues.append(
+                        Issue(
+                            code="INVALID_PROPERTY_NAME",
+                            severity="error",
+                            path=f"{path}.properties",
+                            message="Schema property names must be strings.",
+                            recommendation="Use bounded string property names.",
+                        )
+                    )
+                    continue
+                if len(prop_name) > 256 or any(ord(character) < 32 for character in prop_name):
+                    issues.append(
+                        Issue(
+                            code="UNSAFE_PROPERTY_NAME",
+                            severity="error",
+                            path=f"{path}.properties",
+                            message="Schema property name is too long or contains control characters.",
+                            recommendation="Use concise, visible parameter names without controls.",
+                            evidence=_trim(prop_name),
+                        )
+                    )
                 prop_path = f"{path}.properties.{prop_name}"
                 if check_parameter_quality:
                     _check_parameter(prop_name, prop_schema, prop_path, issues)
@@ -581,7 +1015,59 @@ def _walk_schema(
                     check_parameter_quality=check_parameter_quality,
                 )
 
-    if schema_type == "array":
+        additional = schema.get("additionalProperties")
+        if additional is True and check_parameter_quality:
+            issues.append(
+                Issue(
+                    code="ADDITIONAL_PROPERTIES_ALLOWED",
+                    severity="warning",
+                    path=f"{path}.additionalProperties",
+                    message="Input object explicitly accepts arbitrary extra parameters.",
+                    recommendation="Set additionalProperties to false or provide a restrictive schema for intentional extension fields.",
+                )
+            )
+        elif additional is not None and not isinstance(additional, (bool, dict)):
+            issues.append(
+                Issue(
+                    code="INVALID_ADDITIONAL_PROPERTIES",
+                    severity="error",
+                    path=f"{path}.additionalProperties",
+                    message="additionalProperties must be a boolean or schema object.",
+                    recommendation="Use false for strict objects or provide a schema for extra values.",
+                )
+            )
+        elif isinstance(additional, dict):
+            if check_parameter_quality and not additional:
+                issues.append(
+                    Issue(
+                        code="ADDITIONAL_PROPERTIES_SCHEMA_BROAD",
+                        severity="warning",
+                        path=f"{path}.additionalProperties",
+                        message="Input object allows arbitrary extra values through an empty schema.",
+                        recommendation="Set additionalProperties to false or define a restrictive value schema.",
+                    )
+                )
+            _walk_schema(
+                additional,
+                f"{path}.additionalProperties",
+                depth=depth + 1,
+                config=config,
+                issues=issues,
+                state=state,
+                check_parameter_quality=check_parameter_quality,
+            )
+
+    if "array" in schema_types or schema_type == "array":
+        if check_parameter_quality and "maxItems" not in schema:
+            issues.append(
+                Issue(
+                    code="ARRAY_BOUND_RECOMMENDED",
+                    severity="warning",
+                    path=path,
+                    message="Input array has no maxItems bound.",
+                    recommendation="Add maxItems to constrain request size and downstream work.",
+                )
+            )
         if "items" not in schema:
             issues.append(
                 Issue(
@@ -629,6 +1115,83 @@ def _walk_schema(
                 check_parameter_quality=check_parameter_quality,
             )
 
+    for key in ("not", "if", "then", "else", "contains", "propertyNames", "unevaluatedProperties"):
+        if key not in schema:
+            continue
+        subschema = schema[key]
+        if not isinstance(subschema, (dict, bool)):
+            issues.append(
+                Issue(
+                    code="INVALID_SUBSCHEMA",
+                    severity="error",
+                    path=f"{path}.{key}",
+                    message=f"{key} must contain a schema.",
+                    recommendation="Use a JSON Schema object or boolean schema.",
+                )
+            )
+            continue
+        _walk_schema(
+            subschema,
+            f"{path}.{key}",
+            depth=depth + 1,
+            config=config,
+            issues=issues,
+            state=state,
+            check_parameter_quality=check_parameter_quality,
+        )
+
+    prefix_items = schema.get("prefixItems")
+    if prefix_items is not None:
+        if not isinstance(prefix_items, list):
+            issues.append(
+                Issue(
+                    code="INVALID_PREFIX_ITEMS",
+                    severity="error",
+                    path=f"{path}.prefixItems",
+                    message="prefixItems must be an array of schemas.",
+                    recommendation="Provide bounded tuple item schemas.",
+                )
+            )
+        else:
+            for index, subschema in enumerate(prefix_items):
+                _walk_schema(
+                    subschema,
+                    f"{path}.prefixItems[{index}]",
+                    depth=depth + 1,
+                    config=config,
+                    issues=issues,
+                    state=state,
+                    check_parameter_quality=check_parameter_quality,
+                )
+
+    for key in ("$defs", "definitions", "patternProperties", "dependentSchemas"):
+        mapping = schema.get(key)
+        if mapping is None:
+            continue
+        if not isinstance(mapping, dict):
+            issues.append(
+                Issue(
+                    code="INVALID_SCHEMA_MAP",
+                    severity="error",
+                    path=f"{path}.{key}",
+                    message=f"{key} must be an object mapping names to schemas.",
+                    recommendation="Use schema objects for every mapped entry.",
+                )
+            )
+            continue
+        for name, subschema in mapping.items():
+            if key == "patternProperties" and isinstance(name, str):
+                _check_regex_risk(name, f"{path}.{key}.{name}#key", issues)
+            _walk_schema(
+                subschema,
+                f"{path}.{key}.{name}",
+                depth=depth + 1,
+                config=config,
+                issues=issues,
+                state=state,
+                check_parameter_quality=check_parameter_quality,
+            )
+
     enum = schema.get("enum")
     if enum is not None:
         if not isinstance(enum, list) or len(enum) == 0:
@@ -651,6 +1214,230 @@ def _walk_schema(
                     recommendation="Large enums are costly in tool context; consider lookup tools or shorter value sets.",
                 )
             )
+
+
+def _check_schema_bounds(
+    schema: dict[str, Any], path: str, issues: list[Issue]
+) -> None:
+    numeric_keywords = ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum")
+    for key in numeric_keywords:
+        if key not in schema:
+            continue
+        value = schema[key]
+        if not _is_finite_number(value):
+            issues.append(
+                Issue(
+                    code="INVALID_NUMERIC_BOUND",
+                    severity="error",
+                    path=f"{path}.{key}",
+                    message=f"{key} must be a finite number.",
+                    recommendation="Use a finite JSON number for numeric bounds.",
+                )
+            )
+
+    lower = schema.get("minimum")
+    upper = schema.get("maximum")
+    if _is_finite_number(lower) and _is_finite_number(upper) and lower > upper:
+        issues.append(
+            Issue(
+                code="INVERTED_NUMERIC_BOUNDS",
+                severity="error",
+                path=path,
+                message="minimum is greater than maximum.",
+                recommendation="Correct the numeric interval so at least one value can satisfy it.",
+            )
+        )
+    exclusive_lower = schema.get("exclusiveMinimum")
+    exclusive_upper = schema.get("exclusiveMaximum")
+    if (
+        _is_finite_number(exclusive_lower)
+        and _is_finite_number(exclusive_upper)
+        and exclusive_lower >= exclusive_upper
+    ):
+        issues.append(
+            Issue(
+                code="INVERTED_NUMERIC_BOUNDS",
+                severity="error",
+                path=path,
+                message="exclusiveMinimum is not less than exclusiveMaximum.",
+                recommendation="Correct the exclusive numeric interval.",
+            )
+        )
+
+    if "multipleOf" in schema and (
+        not _is_finite_number(schema["multipleOf"]) or schema["multipleOf"] <= 0
+    ):
+        issues.append(
+            Issue(
+                code="INVALID_MULTIPLE_OF",
+                severity="error",
+                path=f"{path}.multipleOf",
+                message="multipleOf must be a finite number greater than zero.",
+                recommendation="Use a positive divisor.",
+            )
+        )
+
+    integer_bounds = (
+        "minLength",
+        "maxLength",
+        "minItems",
+        "maxItems",
+        "minProperties",
+        "maxProperties",
+        "minContains",
+        "maxContains",
+    )
+    for key in integer_bounds:
+        if key not in schema:
+            continue
+        value = schema[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            issues.append(
+                Issue(
+                    code="INVALID_SIZE_BOUND",
+                    severity="error",
+                    path=f"{path}.{key}",
+                    message=f"{key} must be a non-negative integer.",
+                    recommendation="Use a bounded non-negative integer.",
+                )
+            )
+        elif key.startswith("max") and value > 1_000_000:
+            issues.append(
+                Issue(
+                    code="INEFFECTIVE_SIZE_BOUND",
+                    severity="warning",
+                    path=f"{path}.{key}",
+                    message=f"{key} is so large that it provides little practical resource protection.",
+                    recommendation="Choose a limit based on actual downstream capacity and model context budgets.",
+                )
+            )
+    for minimum_key, maximum_key in (
+        ("minLength", "maxLength"),
+        ("minItems", "maxItems"),
+        ("minProperties", "maxProperties"),
+        ("minContains", "maxContains"),
+    ):
+        minimum = schema.get(minimum_key)
+        maximum = schema.get(maximum_key)
+        if (
+            isinstance(minimum, int)
+            and not isinstance(minimum, bool)
+            and isinstance(maximum, int)
+            and not isinstance(maximum, bool)
+            and minimum > maximum
+        ):
+            issues.append(
+                Issue(
+                    code="INVERTED_SIZE_BOUNDS",
+                    severity="error",
+                    path=path,
+                    message=f"{minimum_key} is greater than {maximum_key}.",
+                    recommendation="Correct the size interval so valid values can satisfy it.",
+                )
+            )
+
+    if "uniqueItems" in schema and not isinstance(schema["uniqueItems"], bool):
+        issues.append(
+            Issue(
+                code="INVALID_UNIQUE_ITEMS",
+                severity="error",
+                path=f"{path}.uniqueItems",
+                message="uniqueItems must be boolean.",
+                recommendation="Use true or false.",
+            )
+        )
+    if "pattern" in schema:
+        pattern = schema["pattern"]
+        if not isinstance(pattern, str):
+            issues.append(
+                Issue(
+                    code="INVALID_PATTERN",
+                    severity="error",
+                    path=f"{path}.pattern",
+                    message="pattern must be a string.",
+                    recommendation="Use an ECMA-262-compatible regular expression string.",
+                )
+            )
+        elif len(pattern) > 2000:
+            issues.append(
+                Issue(
+                    code="PATTERN_TOO_LONG",
+                    severity="warning",
+                    path=f"{path}.pattern",
+                    message="Schema regular expression is unusually long.",
+                    recommendation="Simplify and benchmark the pattern to reduce ReDoS and interoperability risk.",
+                )
+            )
+        elif pattern.strip() in PERMISSIVE_PATTERNS:
+            issues.append(
+                Issue(
+                    code="PERMISSIVE_PATTERN",
+                    severity="warning",
+                    path=f"{path}.pattern",
+                    message="Schema pattern accepts effectively arbitrary text.",
+                    recommendation="Use an allowlist-oriented pattern that constrains the intended syntax.",
+                )
+            )
+        else:
+            _check_regex_risk(pattern, f"{path}.pattern", issues)
+    if "format" in schema and not isinstance(schema["format"], str):
+        issues.append(
+            Issue(
+                code="INVALID_FORMAT",
+                severity="error",
+                path=f"{path}.format",
+                message="format must be a string annotation.",
+                recommendation="Use a standard format name or omit the keyword.",
+            )
+        )
+
+
+def _check_schema_annotation_types(
+    schema: dict[str, Any], path: str, issues: list[Issue]
+) -> None:
+    for key in ("title", "description", "$comment"):
+        if key in schema and not isinstance(schema[key], str):
+            issues.append(
+                Issue(
+                    code="INVALID_SCHEMA_ANNOTATION",
+                    severity="error",
+                    path=f"{path}.{key}",
+                    message=f"Schema {key} annotation must be a string.",
+                    recommendation="Use bounded text annotations.",
+                )
+            )
+    for key in ("readOnly", "writeOnly", "deprecated"):
+        if key in schema and not isinstance(schema[key], bool):
+            issues.append(
+                Issue(
+                    code="INVALID_SCHEMA_ANNOTATION",
+                    severity="error",
+                    path=f"{path}.{key}",
+                    message=f"Schema {key} annotation must be boolean.",
+                    recommendation="Use true or false.",
+                )
+            )
+
+
+def _check_regex_risk(pattern: str, path: str, issues: list[Issue]) -> None:
+    if NESTED_REGEX_QUANTIFIER.search(pattern):
+        issues.append(
+            Issue(
+                code="POTENTIAL_REDOS_PATTERN",
+                severity="warning",
+                path=path,
+                message="Schema pattern contains nested quantifiers associated with excessive backtracking.",
+                recommendation="Rewrite the expression with bounded, non-nested quantifiers and benchmark it in the target validator.",
+            )
+        )
+
+
+def _is_finite_number(value: Any) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+    )
 
 
 def _check_parameter(
@@ -696,7 +1483,7 @@ def _check_parameter(
                     recommendation="Add enum values where the accepted set is finite.",
                 )
             )
-        if lowered in {"command", "query", "q", "body", "text", "message", "msg"} and "maxLength" not in prop_schema:
+        if "maxLength" not in prop_schema:
             issues.append(
                 Issue(
                     code="STRING_BOUND_RECOMMENDED",
@@ -704,6 +1491,55 @@ def _check_parameter(
                     path=path,
                     message=f"Free-form string parameter '{prop_name}' has no maxLength.",
                     recommendation="Add maxLength when large strings could increase latency, cost, or injection risk.",
+                )
+            )
+        pattern = prop_schema.get("pattern")
+        has_constraint = (
+            "enum" in prop_schema
+            or "const" in prop_schema
+            or (
+                isinstance(pattern, str)
+                and pattern.strip() not in PERMISSIVE_PATTERNS
+            )
+        )
+        if COMMAND_PARAM_TERMS.search(lowered) and not has_constraint:
+            issues.append(
+                Issue(
+                    code="COMMAND_PARAMETER_UNCONSTRAINED",
+                    severity="error",
+                    path=path,
+                    message=f"Execution-like parameter '{prop_name}' accepts unconstrained free-form text.",
+                    recommendation="Avoid raw command/code parameters; expose a narrow enum or structured operation schema and enforce it server-side.",
+                )
+            )
+        if URL_PARAM_TERMS.search(lowered) and not has_constraint:
+            issues.append(
+                Issue(
+                    code="URL_PARAMETER_ALLOWLIST_MISSING",
+                    severity="warning",
+                    path=path,
+                    message=f"URL-like parameter '{prop_name}' has no allowlist constraint.",
+                    recommendation="Constrain schemes and destinations with an allowlist and enforce SSRF protections server-side; format alone is not an allowlist.",
+                )
+            )
+        if PATH_PARAM_TERMS.search(lowered) and not has_constraint:
+            issues.append(
+                Issue(
+                    code="PATH_PARAMETER_CONSTRAINT_MISSING",
+                    severity="warning",
+                    path=path,
+                    message=f"Path-like parameter '{prop_name}' has no structural constraint.",
+                    recommendation="Prefer identifiers or paths rooted under an approved directory and reject traversal server-side.",
+                )
+            )
+        if SECRET_PARAM_TERMS.search(lowered):
+            issues.append(
+                Issue(
+                    code="SENSITIVE_PARAMETER_EXPOSED",
+                    severity="warning",
+                    path=path,
+                    message=f"Parameter '{prop_name}' appears to carry a credential or secret.",
+                    recommendation="Use server-side credential binding instead of placing secrets in model-generated tool arguments.",
                 )
             )
 
@@ -771,6 +1607,40 @@ def _check_annotations(
     annotations = tool.annotations
     read_only_hint = annotations.get("readOnlyHint")
     destructive_hint = annotations.get("destructiveHint")
+    open_world_hint = annotations.get("openWorldHint")
+
+    if "title" in annotations and not isinstance(annotations["title"], str):
+        issues.append(
+            Issue(
+                code="INVALID_ANNOTATION_VALUE",
+                severity="error",
+                path="annotations.title",
+                message="Annotation title must be a string.",
+                recommendation="Use a bounded human-readable title.",
+            )
+        )
+    for key in ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"):
+        if key in annotations and not isinstance(annotations[key], bool):
+            issues.append(
+                Issue(
+                    code="INVALID_ANNOTATION_VALUE",
+                    severity="error",
+                    path=f"annotations.{key}",
+                    message=f"{key} must be boolean.",
+                    recommendation="Use true or false; clients must still treat annotation hints as untrusted.",
+                )
+            )
+
+    if read_only_hint is True and destructive_hint is True:
+        issues.append(
+            Issue(
+                code="ANNOTATION_CONFLICT_DESTRUCTIVE_READ_ONLY",
+                severity="error",
+                path="annotations",
+                message="Tool is simultaneously annotated read-only and destructive.",
+                recommendation="Correct the contradictory behavior hints and re-review the implementation.",
+            )
+        )
 
     if _is_side_effect_risk(risk_categories) and read_only_hint is True:
         issues.append(
@@ -805,9 +1675,48 @@ def _check_annotations(
             )
         )
 
+    if "network" in risk_categories and open_world_hint is False:
+        issues.append(
+            Issue(
+                code="ANNOTATION_CONFLICT_OPEN_WORLD",
+                severity="warning",
+                path="annotations.openWorldHint",
+                message="Network-facing metadata conflicts with openWorldHint=false.",
+                recommendation="Correct the hint or explain and constrain the closed set of external entities.",
+            )
+        )
 
-def _check_card_size(tool: ToolCard, config: LintConfig, issues: list[Issue]) -> None:
-    estimated = _estimate_card_chars(tool)
+    execution = tool.raw.get("execution")
+    if execution is not None:
+        if not isinstance(execution, dict):
+            issues.append(
+                Issue(
+                    code="INVALID_EXECUTION_METADATA",
+                    severity="error",
+                    path="execution",
+                    message="execution metadata must be an object.",
+                    recommendation="Use execution.taskSupport with an allowed value or omit execution.",
+                )
+            )
+        else:
+            task_support = execution.get("taskSupport")
+            if task_support is not None and task_support not in {
+                "forbidden",
+                "optional",
+                "required",
+            }:
+                issues.append(
+                    Issue(
+                        code="INVALID_TASK_SUPPORT",
+                        severity="error",
+                        path="execution.taskSupport",
+                        message="taskSupport has an unsupported value.",
+                        recommendation="Use forbidden, optional, or required.",
+                    )
+                )
+
+
+def _check_card_size(estimated: int, config: LintConfig, issues: list[Issue]) -> None:
     if estimated > config.max_card_chars:
         issues.append(
             Issue(
@@ -852,9 +1761,9 @@ def _risk_categories(tool: ToolCard, text_blob: str) -> set[str]:
 def _risk_level(risk_categories: set[str], issues: list[Issue]) -> str:
     if any(issue.severity == "critical" for issue in issues):
         return "critical"
-    if {"destructive", "financial", "secret"} & risk_categories:
+    if {"destructive", "financial", "secret", "code_execution", "integrity"} & risk_categories:
         return "high"
-    if {"write", "network"} & risk_categories:
+    if {"write", "network", "filesystem", "shadowing"} & risk_categories:
         return "medium"
     if risk_categories:
         return "low"
@@ -862,7 +1771,10 @@ def _risk_level(risk_categories: set[str], issues: list[Issue]) -> str:
 
 
 def _is_side_effect_risk(risk_categories: set[str]) -> bool:
-    return bool(risk_categories & {"destructive", "write", "financial", "network"})
+    return bool(
+        risk_categories
+        & {"destructive", "write", "financial", "network", "code_execution"}
+    )
 
 
 def _score(issues: list[Issue]) -> int:
@@ -887,24 +1799,42 @@ def _recommendations(
         recommendations.append("Require human approval before calling this tool in production clients.")
     if any(code.startswith("TOOL_POISONING") for code in codes):
         recommendations.append("Block this tool until the server owner removes instruction-like or secret-seeking metadata.")
+    if "TOOL_CARD_CHANGED" in codes:
+        recommendations.append("Block the changed card until its metadata diff is reviewed and explicitly re-approved.")
+    if {
+        "COMMAND_PARAMETER_UNCONSTRAINED",
+        "URL_PARAMETER_ALLOWLIST_MISSING",
+        "PATH_PARAMETER_CONSTRAINT_MISSING",
+    } & codes:
+        recommendations.append("Replace dangerous free-form inputs with bounded structured values and enforce the same policy server-side.")
     if not recommendations:
         recommendations.append("No blocking issue detected; keep examples and runtime behavior aligned with the card.")
     return recommendations
 
 
-def _estimate_card_chars(tool: ToolCard) -> int:
-    pieces = [
-        tool.name,
-        tool.description or "",
-        repr(tool.input_schema or {}),
-        repr(tool.output_schema or {}),
-        repr(tool.annotations or {}),
-    ]
-    return sum(len(piece) for piece in pieces)
+def _canonical_card_text(tool: ToolCard) -> str:
+    try:
+        return json.dumps(
+            tool.raw,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError, RecursionError):
+        return repr(tool.raw)
+
+
+def _card_fingerprint(canonical: str) -> str:
+    digest = hashlib.sha256(canonical.encode("utf-8", errors="replace")).hexdigest()
+    return f"sha256:{digest}"
 
 
 def _summarize(
-    source_summaries: list[dict[str, Any]], tool_reports: list[ToolReport]
+    source_summaries: list[dict[str, Any]],
+    tool_reports: list[ToolReport],
+    *,
+    baseline_fingerprints: Mapping[tuple[str, str], str] | None,
 ) -> dict[str, Any]:
     severity_counts: dict[str, int] = defaultdict(int)
     risk_counts: dict[str, int] = defaultdict(int)
@@ -923,19 +1853,39 @@ def _summarize(
         for report in tool_reports
         if report.score >= 80 and report.risk_level in {"low"}
     ]
+    blocked_reports = [
+        report
+        for report in tool_reports
+        if report.risk_level == "critical"
+        or any(
+            issue.severity == "critical" or issue.code == "TOOL_CARD_CHANGED"
+            for issue in report.issues
+        )
+    ]
+    blocked_identities = {(report.server_name, report.tool_name) for report in blocked_reports}
     require_approval = [
         report.tool_name
         for report in tool_reports
         if report.risk_level in {"medium", "high"}
+        and (report.server_name, report.tool_name) not in blocked_identities
     ]
     block_until_review = [
-        report.tool_name
-        for report in tool_reports
-        if report.risk_level == "critical"
-        or any(issue.severity == "critical" for issue in report.issues)
+        report.tool_name for report in blocked_reports
     ]
 
     source_errors = sum(len(source["errors"]) for source in source_summaries)
+    current_identities = {(report.server_name, report.tool_name) for report in tool_reports}
+    baseline_summary = {
+        "checked": baseline_fingerprints is not None,
+        "unchanged": sum(report.baseline_status == "unchanged" for report in tool_reports),
+        "changed": sum(report.baseline_status == "changed" for report in tool_reports),
+        "new": sum(report.baseline_status == "new" for report in tool_reports),
+        "missing": (
+            len(set(baseline_fingerprints) - current_identities)
+            if baseline_fingerprints is not None
+            else 0
+        ),
+    }
     return {
         "sources_scanned": len(source_summaries),
         "source_errors": source_errors,
@@ -949,6 +1899,7 @@ def _summarize(
             risk: risk_counts.get(risk, 0)
             for risk in ("critical", "high", "medium", "low")
         },
+        "baseline": baseline_summary,
         "allowed_tools_recommendation": {
             "include_by_default": include_by_default,
             "require_approval": require_approval,

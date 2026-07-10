@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mcp-tool-card-linter"
-version = "0.1.0"
+version = "0.2.0"
 description = "CLI linter for MCP tool cards: schema quality, description clarity, side effects, and tool-poisoning risks."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -30,4 +30,3 @@ mcp-toolsmith = "mcp_tool_card_linter.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-

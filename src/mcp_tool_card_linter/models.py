@@ -1,9 +1,19 @@
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
+from .security import safe_log_text
+
 Severity = Literal["info", "warning", "error", "critical"]
+BaselineStatus = Literal["not_checked", "new", "unchanged", "changed"]
+
+MAX_LINT_TOOLS = 100_000
+MAX_SCHEMA_DEPTH_LIMIT = 64
+MAX_SCHEMA_NODES_LIMIT = 100_000
+MAX_CARD_CHARS_LIMIT = 1_000_000
+MAX_DESCRIPTION_CHARS_LIMIT = 100_000
 
 SEVERITY_ORDER: dict[Severity, int] = {
     "info": 1,
@@ -30,7 +40,7 @@ class Issue:
     evidence: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return _sanitize_report_value(asdict(self))
 
 
 @dataclass(slots=True)
@@ -53,7 +63,7 @@ class ToolCard:
 
         description = safe_raw.get("description")
         if description is not None and not isinstance(description, str):
-            description = str(description)
+            description = None
 
         input_schema = _object_or_none(
             safe_raw.get("inputSchema", safe_raw.get("input_schema"))
@@ -85,6 +95,29 @@ class SourceResult:
     tools: list[ToolCard] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    discovered_tools: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.server_name, str) or not self.server_name:
+            raise ValueError("server_name must be a non-empty string")
+        if not isinstance(self.source_type, str) or not self.source_type:
+            raise ValueError("source_type must be a non-empty string")
+        if not isinstance(self.tools, list) or not all(
+            isinstance(tool, ToolCard) for tool in self.tools
+        ):
+            raise TypeError("tools must be a list of ToolCard values")
+        if not isinstance(self.errors, list) or not all(
+            isinstance(error, str) for error in self.errors
+        ):
+            raise TypeError("errors must be a list of strings")
+        if not isinstance(self.metadata, dict):
+            raise TypeError("metadata must be an object")
+        if self.discovered_tools is not None and (
+            isinstance(self.discovered_tools, bool)
+            or not isinstance(self.discovered_tools, int)
+            or self.discovered_tools < len(self.tools)
+        ):
+            raise ValueError("discovered_tools must be an integer at least len(tools)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +128,25 @@ class LintConfig:
     max_card_chars: int = 2800
     max_description_chars: int = 1200
 
+    def __post_init__(self) -> None:
+        _validate_positive_limit("max_tools", self.max_tools, MAX_LINT_TOOLS)
+        _validate_positive_limit(
+            "max_schema_depth", self.max_schema_depth, MAX_SCHEMA_DEPTH_LIMIT
+        )
+        _validate_positive_limit(
+            "max_schema_properties",
+            self.max_schema_properties,
+            MAX_SCHEMA_NODES_LIMIT,
+        )
+        _validate_positive_limit(
+            "max_card_chars", self.max_card_chars, MAX_CARD_CHARS_LIMIT
+        )
+        _validate_positive_limit(
+            "max_description_chars",
+            self.max_description_chars,
+            MAX_DESCRIPTION_CHARS_LIMIT,
+        )
+
 
 @dataclass(slots=True)
 class ToolReport:
@@ -104,13 +156,15 @@ class ToolReport:
     risk_level: str
     risk_categories: list[str]
     estimated_card_chars: int
+    card_fingerprint: str
+    baseline_status: BaselineStatus
     issues: list[Issue]
     recommendations: list[str]
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["issues"] = [issue.to_dict() for issue in self.issues]
-        return data
+        return _sanitize_report_value(data)
 
 
 @dataclass(slots=True)
@@ -126,14 +180,14 @@ class LintReport:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "generated_at": self.generated_at,
-            "version": self.version,
-            "sources": self.sources,
-            "summary": self.summary,
+            "generated_at": safe_log_text(self.generated_at),
+            "version": safe_log_text(self.version),
+            "sources": _sanitize_report_value(self.sources),
+            "summary": _sanitize_report_value(self.summary),
             "tools": [tool.to_dict() for tool in self.tools],
-            "facts": self.facts,
-            "inferences": self.inferences,
-            "uncertainties": self.uncertainties,
+            "facts": _sanitize_report_value(self.facts),
+            "inferences": _sanitize_report_value(self.inferences),
+            "uncertainties": _sanitize_report_value(self.uncertainties),
         }
 
 
@@ -144,3 +198,36 @@ def _object_or_none(value: Any) -> dict[str, Any] | None:
 def _object_or_empty(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
+
+def _validate_positive_limit(name: str, value: int, maximum: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an integer")
+    if not 1 <= value <= maximum:
+        raise ValueError(f"{name} must be in 1..{maximum}")
+
+
+def _sanitize_report_value(value: Any, *, depth: int = 0) -> Any:
+    if depth > 32:
+        return "<truncated-depth>"
+    if isinstance(value, str):
+        return safe_log_text(value, limit=10_000)
+    if isinstance(value, list):
+        return [_sanitize_report_value(item, depth=depth + 1) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_report_value(item, depth=depth + 1) for item in value]
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            safe_key = safe_log_text(key, limit=1000)
+            candidate = safe_key
+            suffix = 2
+            while candidate in result:
+                candidate = f"{safe_key}#{suffix}"
+                suffix += 1
+            result[candidate] = _sanitize_report_value(item, depth=depth + 1)
+        return result
+    if isinstance(value, float) and not math.isfinite(value):
+        return "<non-finite-number>"
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return safe_log_text(value, limit=10_000)

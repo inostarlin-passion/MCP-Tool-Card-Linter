@@ -68,7 +68,94 @@ class CliFileIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1, result.stderr)
 
+    def test_cli_rejects_non_finite_timeout(self) -> None:
+        result = self.run_cli(
+            [
+                "lint",
+                "--tools-file",
+                "tests/fixtures/good_tools.json",
+                "--timeout",
+                "nan",
+            ]
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("finite", result.stderr)
+
+    def test_cli_does_not_overwrite_input_with_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "tools.json"
+            original = json.dumps({"tools": []})
+            source.write_text(original, encoding="utf-8")
+            result = self.run_cli(
+                [
+                    "lint",
+                    "--tools-file",
+                    str(source),
+                    "--json-report",
+                    str(source),
+                    "--format",
+                    "none",
+                ]
+            )
+            current = source.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(current, original)
+
+    def test_config_command_is_not_executed_without_explicit_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            marker = tmp / "executed"
+            script = tmp / "side_effect.py"
+            script.write_text(
+                "from pathlib import Path\nPath(__file__).with_name('executed').write_text('bad')\n",
+                encoding="utf-8",
+            )
+            config = tmp / "mcp.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "mcpServers": {
+                            "untrusted": {
+                                "command": sys.executable,
+                                "args": [str(script)],
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            report = tmp / "report.json"
+            result = self.run_cli(
+                [
+                    "lint",
+                    "--config",
+                    str(config),
+                    "--json-report",
+                    str(report),
+                    "--fail-on",
+                    "never",
+                    "--format",
+                    "none",
+                ]
+            )
+            payload = json.loads(report.read_text(encoding="utf-8"))
+            marker_exists = marker.exists()
+
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(marker_exists)
+        self.assertEqual(payload["summary"]["source_errors"], 1)
+
+    def test_optimize_invalid_json_returns_controlled_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            invalid = Path(tmpdir) / "invalid.json"
+            invalid.write_text("{not-json", encoding="utf-8")
+            result = self.run_cli(["optimize", "--input-report", str(invalid)])
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Invalid JSON", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
-

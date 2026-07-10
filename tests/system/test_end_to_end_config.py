@@ -43,6 +43,7 @@ class EndToEndConfigTests(unittest.TestCase):
                     "lint",
                     "--config",
                     str(config_path),
+                    "--allow-config-execution",
                     "--json-report",
                     str(report_path),
                     "--fail-on",
@@ -86,4 +87,3 @@ class EndToEndConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
