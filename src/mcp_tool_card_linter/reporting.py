@@ -180,23 +180,6 @@ def report_to_markdown(report: LintReport) -> str:
             lines.append(f"- {_escape(item)}")
         lines.append("")
 
-    lines.extend(
-        [
-            "## Facts, Inferences, And Uncertainties",
-            "",
-            "Facts:",
-            "",
-        ]
-    )
-    for fact in data["facts"]:
-        lines.append(f"- {_escape(fact)}")
-    lines.extend(["", "Inferences:", ""])
-    for inference in data["inferences"]:
-        lines.append(f"- {_escape(inference)}")
-    lines.extend(["", "Uncertainties:", ""])
-    for uncertainty in data["uncertainties"]:
-        lines.append(f"- {_escape(uncertainty)}")
-    lines.append("")
     return "\n".join(lines)
 
 

@@ -61,6 +61,7 @@ class EndToEndConfigTests(unittest.TestCase):
             tmp = Path(tmpdir)
             config_path = tmp / "mcp.json"
             report_path = tmp / "report.json"
+            markdown_path = tmp / "report.md"
             optimized_path = tmp / "optimized.json"
             config_path.write_text(
                 json.dumps(
@@ -87,6 +88,8 @@ class EndToEndConfigTests(unittest.TestCase):
                     "--allow-config-execution",
                     "--json-report",
                     str(report_path),
+                    "--markdown-report",
+                    str(markdown_path),
                     "--fail-on",
                     "never",
                     "--format",
@@ -119,9 +122,11 @@ class EndToEndConfigTests(unittest.TestCase):
             )
             self.assertEqual(optimize.returncode, 0, optimize.stderr)
             report = json.loads(report_path.read_text(encoding="utf-8"))
+            markdown = markdown_path.read_text(encoding="utf-8")
             optimized = json.loads(optimized_path.read_text(encoding="utf-8"))
 
         self.assertEqual(report["summary"]["tools_scanned"], 2)
+        self.assertNotIn("Facts, Inferences, And Uncertainties", markdown)
         self.assertIn("delete_customer", report["summary"]["allowed_tools_recommendation"]["require_approval"])
         self.assertEqual(len(optimized["tools"]), 2)
 

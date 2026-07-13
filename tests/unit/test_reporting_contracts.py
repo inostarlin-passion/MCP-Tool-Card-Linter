@@ -15,6 +15,7 @@ from mcp_tool_card_linter.reporting import (
     report_to_json,
     report_to_jsonl,
     report_to_junit,
+    report_to_markdown,
     report_to_sarif,
 )
 from mcp_tool_card_linter import reporting
@@ -74,6 +75,17 @@ class ReportingContractTests(unittest.TestCase):
 
     def test_deterministic_json_is_byte_stable(self) -> None:
         self.assertEqual(report_to_json(_report()), report_to_json(_report()))
+
+    def test_markdown_omits_reasoning_section_without_changing_json_contract(self) -> None:
+        report = _report()
+        markdown = report_to_markdown(report)
+        payload = json.loads(report_to_json(report))
+
+        self.assertNotIn("Facts, Inferences, And Uncertainties", markdown)
+        for item in [*report.facts, *report.inferences, *report.uncertainties]:
+            self.assertNotIn(item, markdown)
+        for field in ("facts", "inferences", "uncertainties"):
+            self.assertEqual(payload[field], getattr(report, field))
 
     def test_sarif_junit_jsonl_and_github_formats_are_well_formed(self) -> None:
         report = _report()

@@ -52,8 +52,12 @@ class CliFileIntegrationTests(unittest.TestCase):
 
         self.assertEqual(payload["summary"]["tools_scanned"], 3)
         self.assertGreater(payload["summary"]["issues_by_severity"]["critical"], 0)
+        self.assertIn("facts", payload)
+        self.assertIn("inferences", payload)
+        self.assertIn("uncertainties", payload)
         self.assertIn("MCP Tool Card Linter Report", markdown)
         self.assertIn("summarize_issue", markdown)
+        self.assertNotIn("Facts, Inferences, And Uncertainties", markdown)
 
     def test_cli_writes_stable_sarif_junit_jsonl_and_deterministic_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
