@@ -43,6 +43,7 @@ class ProtocolExtensionLintTests(unittest.TestCase):
                         "theme": "unknown",
                     }
                 ],
+                "execution": {"taskSupport": "sometimes"},
                 "inputSchema": {"type": "object", "properties": {}},
             }
         )
@@ -51,6 +52,7 @@ class ProtocolExtensionLintTests(unittest.TestCase):
         self.assertIn("INVALID_TOOL_ICON_MIME_TYPE", codes)
         self.assertIn("INVALID_TOOL_ICON_SIZE", codes)
         self.assertIn("INVALID_TOOL_ICONS", codes)
+        self.assertIn("INVALID_TASK_SUPPORT", codes)
 
     def test_valid_mcp_icon_is_accepted(self) -> None:
         codes = _codes(
@@ -65,10 +67,12 @@ class ProtocolExtensionLintTests(unittest.TestCase):
                         "theme": "light",
                     }
                 ],
+                "execution": {"taskSupport": "optional"},
                 "inputSchema": {"type": "object", "properties": {}},
             }
         )
         self.assertFalse(any(code.startswith("INVALID_TOOL_ICON") for code in codes))
+        self.assertNotIn("INVALID_TASK_SUPPORT", codes)
 
     def test_per_tool_finding_count_is_bounded_and_reports_truncation(self) -> None:
         raw = {

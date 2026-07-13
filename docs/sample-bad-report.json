@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/inostarlin-passion/MCP-Tool-Card-Linter/v0.3.0/src/mcp_tool_card_linter/schemas/report.schema.json",
+  "$schema": "https://raw.githubusercontent.com/inostarlin-passion/MCP-Tool-Card-Linter/v0.4.0/src/mcp_tool_card_linter/schemas/report.schema.json",
   "facts": [
     "MCP tools are model-callable capabilities described by metadata such as name, description, and input schema.",
     "MCP uses JSON-RPC messages over transports such as stdio and Streamable HTTP.",
@@ -24,14 +24,14 @@
   "protocol": [],
   "report_schema_version": "1.0.0",
   "rule_catalog_version": "1.0.0",
-  "scan_id": "urn:sha256:19f14d75393ae4996b1c60eb862064313d26981095ff63baaefff9a1003cebf5",
+  "scan_id": "urn:sha256:9065578d29682d9e6b9193bdd8aee0b0687813367402051e65b7d77c23f0db57",
   "sources": [
     {
       "errors": [],
       "metadata": {
         "path": "/Users/inostarlin/code/MCP-Tool-Card-Linter/examples/bad-tools.json"
       },
-      "server_name": "static",
+      "server_name": "sample",
       "source_type": "tools-file",
       "tools_discovered": 2,
       "tools_linted": 2,
@@ -72,7 +72,7 @@
     "sources_scanned": 1,
     "tools_scanned": 2
   },
-  "tool_version": "0.3.0",
+  "tool_version": "0.4.0",
   "tools": [
     {
       "baseline_status": "not_checked",
@@ -343,7 +343,7 @@
       ],
       "risk_level": "medium",
       "score": 57,
-      "server_name": "static",
+      "server_name": "sample",
       "tool_name": "send"
     },
     {
@@ -510,7 +510,7 @@
       ],
       "risk_level": "critical",
       "score": 44,
-      "server_name": "static",
+      "server_name": "sample",
       "tool_name": "summarize_issue"
     }
   ],
@@ -518,5 +518,5 @@
     "Tool Card is an engineering term in this project, not a formal MCP specification object.",
     "A static linter cannot verify whether server implementation behavior matches its metadata."
   ],
-  "version": "0.3.0"
+  "version": "0.4.0"
 }

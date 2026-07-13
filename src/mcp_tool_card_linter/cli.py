@@ -19,6 +19,12 @@ from .discovery import (
 )
 from .lint import lint_sources
 from .models import LintConfig, SourceResult
+from .oauth import (
+    callback_url_from_environment,
+    callback_url_from_file,
+    complete_authorization,
+    start_authorization,
+)
 from .policy import PROFILES, PolicyConfig, load_policy
 from .reporting import (
     ReportError,
@@ -59,6 +65,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_list_rules(args)
         if args.command == "explain":
             return _run_explain(args)
+        if args.command == "authorize":
+            return _run_authorize(args)
         parser.print_help(sys.stderr)
         return 2
     except (DiscoveryError, ReportError, InputValidationError) as exc:
@@ -117,6 +125,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Newest MCP protocol version to request; a supported previous version may be negotiated.",
     )
     lint_parser.add_argument("--timeout", type=_timeout_seconds, default=10.0, help="Total MCP request timeout in seconds (0.05..300)")
+    lint_parser.add_argument(
+        "--refresh-on-list-changed",
+        type=_optional_timeout_seconds,
+        default=0.0,
+        metavar="SECONDS",
+        help="Wait up to 0..300 seconds for tools/list_changed, then re-list once (default: disabled)",
+    )
     lint_parser.add_argument("--max-tools", type=lambda value: _bounded_int(value, 100_000), default=1000, help="Maximum tools to lint per source")
     lint_parser.add_argument("--concurrency", type=lambda value: _bounded_int(value, 32), default=4, help="Concurrent servers for config discovery (max 32)")
     lint_parser.add_argument("--max-pages", type=lambda value: _bounded_int(value, 10_000), default=100, help="Maximum tools/list pages per source")
@@ -208,6 +223,66 @@ def build_parser() -> argparse.ArgumentParser:
     explain_parser.add_argument("rule_id", choices=KNOWN_RULE_IDS)
     explain_parser.add_argument("--format", choices=["text", "json"], default="text")
     explain_parser.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
+
+    authorize_parser = subparsers.add_parser(
+        "authorize",
+        help="Run MCP OAuth Authorization Code + PKCE for a pre-registered public client",
+    )
+    authorize_actions = authorize_parser.add_subparsers(
+        dest="authorize_command",
+        required=True,
+    )
+    authorize_start = authorize_actions.add_parser(
+        "start",
+        help="Discover metadata, persist private PKCE state, and print the authorization URL",
+    )
+    authorize_start.add_argument("--server-url", required=True, help="Protected MCP endpoint")
+    authorize_start.add_argument("--client-id", required=True, help="Pre-registered public client ID")
+    authorize_start.add_argument("--redirect-uri", required=True, help="Registered HTTPS or localhost redirect URI")
+    authorize_start.add_argument("--state-file", required=True, help="New private file for single-use PKCE state")
+    authorize_start.add_argument(
+        "--scope",
+        action="append",
+        default=[],
+        help="Request one OAuth scope token; repeat for multiple scopes",
+    )
+    authorize_complete = authorize_actions.add_parser(
+        "complete",
+        help="Validate the callback, exchange the code, and write a private bearer-token file",
+    )
+    authorize_complete.add_argument("--state-file", required=True, help="Private PKCE state from authorize start")
+    authorize_complete.add_argument("--token-file", required=True, help="Private bearer-token output file")
+    callback_source = authorize_complete.add_mutually_exclusive_group(required=True)
+    callback_source.add_argument(
+        "--callback-url-env",
+        help="Read the full callback URL from this environment variable",
+    )
+    callback_source.add_argument(
+        "--callback-url-file",
+        help="Read the full callback URL from a mode-0600 file",
+    )
+    for authorize_action in (authorize_start, authorize_complete):
+        authorize_action.add_argument(
+            "--timeout",
+            type=_timeout_seconds,
+            default=10.0,
+            help="OAuth request timeout in seconds (0.05..300)",
+        )
+        authorize_action.add_argument(
+            "--allow-private-network",
+            action="store_true",
+            help="Allow private/reserved OAuth metadata and endpoint destinations",
+        )
+        authorize_action.add_argument(
+            "--allow-insecure-http",
+            action="store_true",
+            help="Allow plain HTTP OAuth endpoints for explicitly trusted local testing",
+        )
+        authorize_action.add_argument("--ca-bundle", help="PEM CA bundle")
+        authorize_action.add_argument("--proxy", help="Explicit HTTP(S) proxy URL")
+        authorize_action.add_argument("--client-cert", help="PEM client certificate chain")
+        authorize_action.add_argument("--client-key", help="PEM private key for mTLS")
+        authorize_action.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
@@ -298,6 +373,7 @@ def _discover_sources(args: argparse.Namespace) -> list[SourceResult]:
             proxy_url=args.proxy,
             client_cert=args.client_cert,
             client_key=args.client_key,
+            refresh_on_list_changed=args.refresh_on_list_changed,
         )
     if args.stdio:
         return [
@@ -310,6 +386,7 @@ def _discover_sources(args: argparse.Namespace) -> list[SourceResult]:
                 inherit_env=args.inherit_env,
                 compat_stdio_noise=args.compat_stdio_noise,
                 protocol_version=args.protocol_version,
+                refresh_on_list_changed=args.refresh_on_list_changed,
             )
         ]
     if args.server_url:
@@ -329,6 +406,7 @@ def _discover_sources(args: argparse.Namespace) -> list[SourceResult]:
                 proxy_url=args.proxy,
                 client_cert=args.client_cert,
                 client_key=args.client_key,
+                refresh_on_list_changed=args.refresh_on_list_changed,
             )
         ]
     raise DiscoveryError("No source selected")
@@ -378,6 +456,66 @@ def _run_explain(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_authorize(args: argparse.Namespace) -> int:
+    network = {
+        "timeout": args.timeout,
+        "allow_private_network": args.allow_private_network,
+        "allow_insecure_http": args.allow_insecure_http,
+        "ca_bundle": args.ca_bundle,
+        "proxy_url": args.proxy,
+        "client_cert": args.client_cert,
+        "client_key": args.client_key,
+    }
+    if args.authorize_command == "start":
+        result = start_authorization(
+            args.server_url,
+            client_id=args.client_id,
+            redirect_uri=args.redirect_uri,
+            state_file=args.state_file,
+            scopes=args.scope,
+            **network,
+        )
+    elif args.authorize_command == "complete":
+        callback_url = (
+            callback_url_from_environment(args.callback_url_env)
+            if args.callback_url_env
+            else callback_url_from_file(args.callback_url_file)
+        )
+        state_path = _resolved_path(args.state_file)
+        token_path = _resolved_path(args.token_file)
+        if state_path == token_path:
+            raise InputValidationError("OAuth token file must differ from the state file")
+        if args.callback_url_file and token_path == _resolved_path(args.callback_url_file):
+            raise InputValidationError("OAuth token file must not overwrite the callback file")
+        for option_name, input_path in (
+            ("CA bundle", args.ca_bundle),
+            ("client certificate", args.client_cert),
+            ("client key", args.client_key),
+        ):
+            if input_path and token_path == _resolved_path(input_path):
+                raise InputValidationError(
+                    f"OAuth token file must not overwrite the {option_name}"
+                )
+        result = complete_authorization(
+            state_file=args.state_file,
+            callback_url=callback_url,
+            token_file=args.token_file,
+            **network,
+        )
+    else:
+        raise InputValidationError("Unknown authorize action")
+    print(
+        json.dumps(
+            result,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+    )
+    return 0
+
+
 def _credential_provider(args: argparse.Namespace) -> CredentialProvider | None:
     if args.bearer_token_env:
         return BearerTokenProvider.from_environment(args.bearer_token_env)
@@ -403,6 +541,16 @@ def _timeout_seconds(value: str) -> float:
         raise argparse.ArgumentTypeError("must be a number") from exc
     if not math.isfinite(number) or not 0.05 <= number <= 300:
         raise argparse.ArgumentTypeError("must be finite and in 0.05..300")
+    return number
+
+
+def _optional_timeout_seconds(value: str) -> float:
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a number") from exc
+    if not math.isfinite(number) or not 0 <= number <= 300:
+        raise argparse.ArgumentTypeError("must be finite and in 0..300")
     return number
 
 

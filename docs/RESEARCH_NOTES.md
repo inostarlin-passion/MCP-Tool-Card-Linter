@@ -13,6 +13,7 @@
 5. 以 Python 官方 `subprocess`、`tempfile` 文档核验进程会话、显式环境映射和安全临时文件行为。
 6. 对照 2025/2026 MCP 安全与工具描述论文，以及公开 scanner 的 rug-pull/command-execution实践，区分“规范事实”“工程推断”和“仍不确定事项”。
 7. 针对 v0.3 生产化增量继续做多跳核验：MCP lifecycle→version/capability negotiation→tools capability；transport→stdio purity/SSE→Retry-After RFC；authorization→RFC 9728/8414/8707/PKCE；报告→SARIF 2.1.0→GitHub ingestion limits；发布→PyPI Trusted Publishing→OIDC/attestation；SBOM→CycloneDX Python 工具。
+8. 针对 v0.4 一致性增量复核 MCP Streamable HTTP 的空 `data` 预热事件、SSE `id`/`retry`、GET + `Last-Event-ID` 恢复和 `tools/list_changed`；再沿 MCP Authorization 跳转 RFC 9728、RFC 8414/OIDC discovery、RFC 7636、RFC 8707，并实际执行官方 conformance runner 0.1.15 的 2025-11-25 `initialize` 场景。
 
 优先级为：正式规范/RFC/标准库官方文档 > OWASP/CWE > 论文原文 > 开源实现说明。论文为预印本或经验研究时，不把其结论表述为协议保证。
 
@@ -54,7 +55,7 @@
 12. MCP 初始化不是固定版本回显检查：客户端发送其支持的最新版本，服务端可返回自己支持的另一版本；客户端只有支持该返回值才能继续。能力协商同样是操作前提，server 只有声明 `tools` capability 才应接受 `tools/list`。HTTP 后续请求必须发送协商后的 `MCP-Protocol-Version`。
     来源：[MCP Lifecycle](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle)、[MCP Tools](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)
 
-13. MCP 2025-11-25 的 `Icon` 包含必需 `src` 以及可选 `mimeType`、`sizes`、`theme`；icon URL 可能引入跟踪、凭据泄露、超大图片和可执行 SVG 风险。客户端应限制大小、验证内容，并优先同源且不携带认证获取。本项目只验证结构且不下载，因此不会新增 icon fetch SSRF 面。
+13. MCP 2025-11-25 的 `Icon` 包含必需 `src` 以及可选 `mimeType`、`sizes`、`theme`；icon URL 可能引入跟踪、凭据泄露、超大图片和可执行 SVG 风险。`Tool.execution.taskSupport` 只允许 `forbidden`、`optional`、`required`。本项目验证 icon/taskSupport 结构但不下载 icon、不调用工具，因此不会新增 icon fetch SSRF 或 task execution 面。
     来源：[MCP Schema Reference](https://modelcontextprotocol.io/specification/2025-11-25/schema)、[MCP Base Protocol icon security guidance](https://modelcontextprotocol.io/specification/2025-11-25/basic)
 
 14. 2025-11-25 将 JSON Schema 2020-12 设为 MCP schema 默认 dialect。`jsonschema` 的 `Draft202012Validator.check_schema` 用元模式验证 schema 本身，因此适合把“规范合法性”和本项目启发式质量/安全规则分开。
@@ -75,6 +76,21 @@
 19. HTTP `Retry-After` 可以是 delay-seconds 或 HTTP-date；503 可用它说明预计不可用时长，429 也可携带。客户端仍需用总 deadline 和最大等待上限约束服务端建议，避免把韧性机制变成任意阻塞。
     来源：[RFC 9110 §10.2.3](https://www.rfc-editor.org/rfc/rfc9110.html#name-retry-after)、[RFC 6585 §4](https://www.rfc-editor.org/rfc/rfc6585.html#section-4)
 
+20. Streamable HTTP 的 POST 可返回 JSON 或 SSE。SSE 长响应应先发送带 event ID 的空 `data` 事件；连接中断后客户端通过 GET 并携带 `Last-Event-ID` 恢复，且应尊重 SSE `retry` 毫秒值。GET listener 是 server 可选能力，不支持时返回 405。
+    来源：[MCP 2025-11-25 Transports](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
+
+21. 声明 `tools.listChanged=true` 的 server 可发送 `notifications/tools/list_changed`；客户端收到后应刷新缓存。能力未声明时，等待该通知不是合法的协商后操作。
+    来源：[MCP Tools](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)、[MCP Client Best Practices](https://modelcontextprotocol.io/docs/develop/clients/client-best-practices)
+
+22. MCP Authorization 要求客户端优先使用 401 challenge 中的 Protected Resource Metadata URL，否则按 endpoint path、root 顺序查找；Authorization Server Metadata 对带 path issuer 必须依次尝试 RFC 8414 path insertion、OIDC path insertion、OIDC path append。challenge scope 对当前请求具有权威性；PKCE metadata 不含 `S256` 时必须拒绝。
+    来源：[MCP 2025-11-25 Authorization](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization)、[RFC 9728](https://www.rfc-editor.org/rfc/rfc9728.html)、[RFC 8414](https://www.rfc-editor.org/rfc/rfc8414.html)
+
+23. RFC 7636 的 S256 为 `BASE64URL(SHA256(ASCII(code_verifier)))`，verifier/challenge 长度为 43..128 个 unreserved 字符；RFC 8707 把 `resource` 定义在 authorization request 和 token request，并建议使用最具体、可网络寻址的 resource URI 以做 audience restriction。
+    来源：[RFC 7636](https://www.rfc-editor.org/rfc/rfc7636.html)、[RFC 8707](https://www.rfc-editor.org/rfc/rfc8707.html)
+
+24. MCP 官方 conformance runner 会启动场景 server、把 URL 交给 client command、捕获交互并执行规范检查；`initialize` 验证版本、`clientInfo` 和响应处理，`sse-retry` 验证 graceful close 后 GET、`retry` 时序与 `Last-Event-ID`。v0.4 本地实际运行 integrity-locked 0.1.15，两个场景 2/2、规范检查 4/4 通过，并纳入 CI。
+    来源：[MCP Conformance](https://github.com/modelcontextprotocol/conformance)
+
 ## 从事实到实现的推理链
 
 | 事实/威胁 | 第一性原理 | 本项目措施 |
@@ -93,6 +109,9 @@
 | 组织需要稳定机器消费 | CI 不能依赖会变化的终端文案 | report schema 1.0.0、scan ID、JSON Pointer、rule metadata、deterministic JSON、SARIF/JUnit/JSONL/GitHub annotations |
 | 例外会成为永久绕过 | suppression 必须可归责并自动失效 | TOML policy 要求 reason/owner/expires；到期 finding 恢复且 expired record 进入报告 |
 | 认证材料容易从 argv/URL/报告泄漏 | token 的输入面应与普通配置分离 | 只从 env/0600 file 提供预签发 Bearer token；endpoint/proxy 禁止 userinfo；报告只记录 authenticated boolean；自定义 CA/proxy/mTLS 分离 |
+| SSE 连接会正常中断且事件可能滞后 | 网络连接不是事务边界；恢复必须有游标、deadline 和重复上限 | 增量 parser；空预热事件；`id`/`retry`；GET + `Last-Event-ID`；总 timeout、3 次重连、行/body/event 上限 |
+| 工具目录可在扫描中变化 | 快照只有在消费变更通知后重取才与 server 当前声明一致 | 仅在 `tools.listChanged=true` 后等待；stdio/HTTP 共用精确通知判定；命中后 exactly-once re-list 并记录 metadata |
+| OAuth code/token 可被截获、替换或错发 audience | 授权必须把发起者、回调、issuer 和 resource 绑定到同一事务 | S256 PKCE、随机 state、可选 `iss` 校验、exact redirect、双请求 `resource`、0600 有期限 state、O_EXCL completion lock、token 不进 argv/URL/output |
 
 ## 推断
 
@@ -106,7 +125,8 @@
 
 1. 规则是可解释的启发式，可能有 false positive/false negative；尤其无法静态证明 server implementation 与 card 一致。
 2. 标准库 DNS 解析无法无竞态地 pin 到后续 socket；高保证部署仍需 egress proxy/network policy。项目已禁 redirect、重复校验和默认阻止 private/reserved 地址，但不宣称消除 DNS rebinding。
-3. Streamable HTTP 当前覆盖 initialize、notification、分页 tools/list、有限 JSON/SSE response、session DELETE 和预签发 Bearer/mTLS；不实现 OAuth metadata/Authorization Code+PKCE、GET SSE multiplex/resumption、list_changed subscription、experimental tasks 或全部 draft 行为。
+3. Streamable HTTP v0.4 覆盖 discovery 所需的 initialize、notification、分页 tools/list、JSON/SSE、GET listener/resumption、list_changed 和 session cleanup；它不是通用 SDK，未声明或实现 sampling、roots、elicitation、experimental tasks 及全部 draft 行为。
 4. POSIX 使用独立 session 尽力终止进程组；Windows 能关闭直接子进程和 pipe，但没有实现 Job Object，因此不能保证清理任意脱离/再派生的后代。
 5. SHA-256 baseline 未签名。若 baseline 和当前报告能被同一攻击者修改，change detection 失效。
 6. 本项目只扫描 tool card，不扫描 MCP prompts/resources、server source code、依赖漏洞、runtime tool output 或多步 toxic flow；应与 sandbox、SAST/SCA、runtime policy、audit 和人工复核组合。
+7. OAuth v0.4 是预注册 public-client 流程；不自动启动浏览器、不实现 DCR/Client ID Metadata Document、refresh-token rotation 或 runtime insufficient-scope step-up。token audience 最终仍必须由 authorization/resource server 验证。

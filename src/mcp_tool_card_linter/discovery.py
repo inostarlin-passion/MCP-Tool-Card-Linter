@@ -15,6 +15,7 @@ import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -36,7 +37,7 @@ from .security import (
     validate_mcp_url,
 )
 
-SUPPORTED_MCP_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18")
+SUPPORTED_MCP_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
 MCP_PROTOCOL_VERSION = SUPPORTED_MCP_PROTOCOL_VERSIONS[0]
 MAX_STDERR_LINES = 100
 MAX_STDERR_LINE_BYTES = 4096
@@ -56,6 +57,10 @@ MAX_RESPONSE_BYTES_LIMIT = 16 * 1024 * 1024
 MAX_TIMEOUT_SECONDS = 300.0
 MAX_HTTP_RETRIES = 3
 MAX_RETRY_AFTER_SECONDS = 30.0
+MAX_SSE_EVENTS = 10_000
+MAX_SSE_LINE_BYTES = 64 * 1024
+MAX_SSE_RECONNECTS = 3
+MAX_SESSION_RECOVERIES = 1
 _TRANSIENT_HTTP_CODES = {429, 502, 503, 504}
 _TERMINATE_SIGNAL = signal.SIGTERM
 _KILL_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)
@@ -90,6 +95,10 @@ class UnsupportedFeatureError(DiscoveryError):
     """Raised when negotiated capabilities do not permit an operation."""
 
 
+class SessionExpiredError(DiscoveryError):
+    """Raised when a Streamable HTTP server terminates an MCP session."""
+
+
 def load_tools_file(
     path: str | Path,
     *,
@@ -116,8 +125,10 @@ def discover_from_stdio_command(
     inherit_env: bool = False,
     compat_stdio_noise: bool = False,
     protocol_version: str = MCP_PROTOCOL_VERSION,
+    refresh_on_list_changed: float = 0.0,
 ) -> SourceResult:
     _validate_server_name(server_name)
+    _validate_optional_timeout("refresh_on_list_changed", refresh_on_list_changed)
     if not isinstance(command_text, str) or not command_text.strip():
         raise DiscoveryError("--stdio command is empty")
     if len(command_text) > MAX_COMMAND_CHARS or "\x00" in command_text:
@@ -134,6 +145,11 @@ def discover_from_stdio_command(
         protocol_version=protocol_version,
     ) as client:
         raw_tools = client.list_tools(max_tools=max_tools, max_pages=max_pages)
+        list_changed = False
+        if refresh_on_list_changed > 0:
+            list_changed = client.wait_for_tools_list_changed(refresh_on_list_changed)
+            if list_changed:
+                raw_tools = client.list_tools(max_tools=max_tools, max_pages=max_pages)
         protocol_metadata = client.discovery_metadata()
     return _source_from_raw_tools(
         server_name=server_name,
@@ -142,6 +158,8 @@ def discover_from_stdio_command(
         metadata={
             "command": redact_command(command),
             "compat_stdio_noise": compat_stdio_noise,
+            "list_changed_received": list_changed,
+            "refresh_count": int(list_changed),
             **protocol_metadata,
         },
     )
@@ -164,8 +182,10 @@ def discover_from_server_url(
     proxy_url: str | None = None,
     client_cert: str | None = None,
     client_key: str | None = None,
+    refresh_on_list_changed: float = 0.0,
 ) -> SourceResult:
     _validate_server_name(server_name)
+    _validate_optional_timeout("refresh_on_list_changed", refresh_on_list_changed)
     with StreamableHttpMcpClient(
         url,
         timeout=timeout,
@@ -181,12 +201,22 @@ def discover_from_server_url(
         client_key=client_key,
     ) as client:
         raw_tools = client.list_tools(max_tools=max_tools, max_pages=max_pages)
+        list_changed = False
+        if refresh_on_list_changed > 0:
+            list_changed = client.wait_for_tools_list_changed(refresh_on_list_changed)
+            if list_changed:
+                raw_tools = client.list_tools(max_tools=max_tools, max_pages=max_pages)
         protocol_metadata = client.discovery_metadata()
     return _source_from_raw_tools(
         server_name=server_name,
         source_type="streamable-http",
         raw_tools=raw_tools,
-        metadata={"url": redact_url(url), **protocol_metadata},
+        metadata={
+            "url": redact_url(url),
+            "list_changed_received": list_changed,
+            "refresh_count": int(list_changed),
+            **protocol_metadata,
+        },
     )
 
 
@@ -210,6 +240,7 @@ def discover_from_config(
     proxy_url: str | None = None,
     client_cert: str | None = None,
     client_key: str | None = None,
+    refresh_on_list_changed: float = 0.0,
 ) -> list[SourceResult]:
     _validate_timeout(timeout)
     _validate_positive_int("max_tools", max_tools, MAX_LINT_TOOLS)
@@ -219,6 +250,7 @@ def discover_from_config(
         "max_response_bytes", max_response_bytes, MAX_RESPONSE_BYTES_LIMIT
     )
     _validate_protocol_version(protocol_version)
+    _validate_optional_timeout("refresh_on_list_changed", refresh_on_list_changed)
     if server_filter is not None:
         _validate_server_name(server_filter)
 
@@ -258,6 +290,7 @@ def discover_from_config(
                 proxy_url,
                 client_cert,
                 client_key,
+                refresh_on_list_changed,
             ): name
             for name, cfg in sorted(servers.items())
         }
@@ -309,6 +342,7 @@ class StdioMcpClient:
         self._stdout_thread: threading.Thread | None = None
         self._stderr_lines: queue.Queue[str] = queue.Queue(maxsize=MAX_STDERR_LINES)
         self._stderr_thread: threading.Thread | None = None
+        self._tools_changed_pending: bool = False
 
     def __enter__(self) -> "StdioMcpClient":
         self.start()
@@ -408,6 +442,47 @@ class StdioMcpClient:
             seen_cursors.add(next_cursor)
             cursor = next_cursor
         raise DiscoveryError(f"tools/list exceeded the {max_pages} page limit")
+
+    def wait_for_tools_list_changed(self, timeout: float) -> bool:
+        _require_list_changed_capability(self.server_capabilities)
+        wait_timeout = _validate_optional_timeout("list changed timeout", timeout)
+        if wait_timeout == 0:
+            return False
+        with self._request_lock:
+            if self._tools_changed_pending:
+                self._tools_changed_pending = False
+                return True
+            deadline = time.monotonic() + wait_timeout
+            skipped = 0
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                try:
+                    raw_line = self._stdout_messages.get(timeout=remaining)
+                except queue.Empty:
+                    return False
+                if raw_line is None:
+                    raise DiscoveryError(
+                        "stdio server exited while waiting for notifications/tools/list_changed"
+                    )
+                message = _decode_stdio_message(
+                    raw_line,
+                    compat_stdio_noise=self.compat_stdio_noise,
+                )
+                if message is None:
+                    skipped += 1
+                elif _is_tools_list_changed_notification(message):
+                    return True
+                else:
+                    server_response = _server_request_response(message)
+                    if server_response is not None:
+                        self._write_message(server_response)
+                    skipped += 1
+                if skipped > MAX_SKIPPED_STDIO_MESSAGES:
+                    raise JsonRpcError(
+                        "Too many unrelated messages while waiting for tools/list_changed"
+                    )
 
     def request(self, method: str, params: dict[str, Any] | None = None) -> Any:
         with self._request_lock:
@@ -520,36 +595,25 @@ class StdioMcpClient:
                     f"stdio server exited before response id={request_id}. "
                     f"returncode={proc.poll()} stderr_tail={self.stderr_tail()}"
                 )
-            if len(raw_line) > MAX_STDIO_MESSAGE_BYTES or not raw_line.endswith(b"\n"):
-                raise DiscoveryError(
-                    f"stdio JSON-RPC message exceeds {MAX_STDIO_MESSAGE_BYTES} bytes"
-                )
-            try:
-                text = raw_line.decode("utf-8")
-                message = strict_json_loads(text)
-            except UnicodeDecodeError as exc:
-                raise JsonRpcError("stdio MCP message is not valid UTF-8") from exc
-            except InputValidationError as exc:
-                if raw_line.lstrip().startswith((b"{", b"[")):
-                    raise JsonRpcError(
-                        f"stdio server returned malformed JSON: {safe_log_text(exc)}"
-                    ) from exc
-                if not self.compat_stdio_noise:
-                    raise JsonRpcError(
-                        "stdio server wrote non-JSON data to stdout; use compatibility mode only for a reviewed legacy server"
-                    ) from exc
+            message = _decode_stdio_message(
+                raw_line,
+                compat_stdio_noise=self.compat_stdio_noise,
+            )
+            if message is None:
                 skipped += 1
                 if skipped > MAX_SKIPPED_STDIO_MESSAGES:
                     raise JsonRpcError("Too many invalid messages on stdio stdout")
                 continue
-            if not isinstance(message, dict):
-                if not self.compat_stdio_noise:
-                    raise JsonRpcError("stdio MCP message must be a JSON object")
+            server_response = _server_request_response(message)
+            if server_response is not None:
+                self._write_message(server_response)
                 skipped += 1
                 if skipped > MAX_SKIPPED_STDIO_MESSAGES:
                     raise JsonRpcError("Too many unrelated messages on stdio stdout")
                 continue
             if message.get("id") != request_id:
+                if _is_tools_list_changed_notification(message):
+                    self._tools_changed_pending = True
                 skipped += 1
                 if skipped > MAX_SKIPPED_STDIO_MESSAGES:
                     raise JsonRpcError("Too many unrelated messages on stdio stdout")
@@ -723,7 +787,9 @@ class StreamableHttpMcpClient:
         self.credential_provider = credential_provider
         self._request_id = 0
         self._session_id: str | None = None
+        self._session_recoveries = 0
         self._request_lock = threading.Lock()
+        self._tools_changed_pending: bool = False
         self._opener = _build_http_opener(
             ca_bundle=ca_bundle,
             proxy_url=proxy_url,
@@ -763,9 +829,7 @@ class StreamableHttpMcpClient:
         ) = _validate_initialize_result(result)
         session_id = _header_value(headers, "mcp-session-id")
         if session_id:
-            if len(session_id) > 1024 or any(ord(char) < 32 for char in session_id):
-                raise JsonRpcError("Mcp-Session-Id header is invalid")
-            self._session_id = session_id
+            self._session_id = _validate_session_id(session_id)
         self._notify("notifications/initialized", {})
 
     def list_tools(
@@ -777,6 +841,25 @@ class StreamableHttpMcpClient:
         _validate_positive_int("max_tools", max_tools, MAX_LINT_TOOLS)
         _validate_positive_int("max_pages", max_pages, MAX_PAGES_LIMIT)
         _require_tools_capability(self.server_capabilities)
+        try:
+            return self._list_tools_snapshot(max_tools=max_tools, max_pages=max_pages)
+        except SessionExpiredError:
+            if self._session_recoveries >= MAX_SESSION_RECOVERIES:
+                raise DiscoveryError(
+                    f"MCP session exceeded the {MAX_SESSION_RECOVERIES} recovery limit"
+                )
+            self._session_recoveries += 1
+            self._session_id = None
+            self.initialize()
+            _require_tools_capability(self.server_capabilities)
+            return self._list_tools_snapshot(max_tools=max_tools, max_pages=max_pages)
+
+    def _list_tools_snapshot(
+        self,
+        *,
+        max_tools: int,
+        max_pages: int,
+    ) -> list[Any]:
         tools: list[Any] = []
         cursor: str | None = None
         seen_cursors: set[str] = set()
@@ -795,6 +878,66 @@ class StreamableHttpMcpClient:
             seen_cursors.add(next_cursor)
             cursor = next_cursor
         raise DiscoveryError(f"tools/list exceeded the {max_pages} page limit")
+
+    def wait_for_tools_list_changed(self, timeout: float) -> bool:
+        _require_list_changed_capability(self.server_capabilities)
+        wait_timeout = _validate_optional_timeout("list changed timeout", timeout)
+        if wait_timeout == 0:
+            return False
+        with self._request_lock:
+            if self._take_tools_changed_notification():
+                return True
+            deadline = time.monotonic() + wait_timeout
+            last_event_id: str | None = None
+            retry_seconds: float | None = None
+            for _attempt in range(MAX_SSE_RECONNECTS + 1):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                if retry_seconds is not None:
+                    if remaining <= retry_seconds:
+                        return False
+                    time.sleep(retry_seconds)
+                    remaining = deadline - time.monotonic()
+                request = self._sse_get_request(last_event_id=last_event_id)
+                try:
+                    with self._open(request, timeout=remaining) as response:
+                        headers = dict(response.headers.items())
+                        _require_content_type(headers, "text/event-stream")
+                        result = _consume_sse_stream(
+                            response,
+                            max_bytes=self.max_response_bytes,
+                            request_id=None,
+                            on_notification=self._handle_server_message,
+                        )
+                except urllib.error.HTTPError as exc:
+                    exc.close()
+                    if exc.code == 405:
+                        raise UnsupportedFeatureError(
+                            "unsupported_feature: server does not offer an HTTP GET SSE listener"
+                        ) from exc
+                    raise DiscoveryError(
+                        f"HTTP SSE listener failed with status {exc.code}"
+                    ) from exc
+                except urllib.error.URLError as exc:
+                    if isinstance(exc.reason, TimeoutError):
+                        if self._take_tools_changed_notification():
+                            return True
+                        return False
+                    raise DiscoveryError(
+                        f"HTTP SSE listener failed: {safe_log_text(exc.reason)}"
+                    ) from exc
+                except TimeoutError:
+                    if self._take_tools_changed_notification():
+                        return True
+                    return False
+                if self._take_tools_changed_notification():
+                    return True
+                last_event_id = result.last_event_id
+                retry_seconds = result.retry_seconds
+            raise DiscoveryError(
+                f"SSE listener exceeded the {MAX_SSE_RECONNECTS} reconnect limit"
+            )
 
     def close(self) -> None:
         with self._request_lock:
@@ -891,14 +1034,44 @@ class StreamableHttpMcpClient:
                 break
             try:
                 with self._open(request, timeout=remaining) as response:
-                    raw = _read_limited(response, self.max_response_bytes)
                     headers = dict(response.headers.items())
-                message = _parse_http_response(raw, headers, request_id=request_id)
+                    content_type = _content_type(headers)
+                    if content_type == "text/event-stream":
+                        sse_result = _consume_sse_stream(
+                            response,
+                            max_bytes=self.max_response_bytes,
+                            request_id=request_id,
+                            on_notification=self._handle_server_message,
+                        )
+                    else:
+                        raw = _read_limited(response, self.max_response_bytes)
+                        message = _parse_http_response(
+                            raw,
+                            headers,
+                            request_id=request_id,
+                        )
+                        return message, headers
+                if sse_result.message is not None:
+                    return sse_result.message, headers
+                resume_session_id = _header_value(headers, "mcp-session-id") or None
+                if resume_session_id is not None:
+                    resume_session_id = _validate_session_id(resume_session_id)
+                message = self._resume_sse_response(
+                    request_id=request_id,
+                    last_event_id=sse_result.last_event_id,
+                    retry_seconds=sse_result.retry_seconds,
+                    deadline=deadline,
+                    session_id=resume_session_id,
+                )
                 return message, headers
             except urllib.error.HTTPError as exc:
                 last_error = exc
                 retry_after = _retry_after_seconds(exc.headers.get("Retry-After"))
                 error_body = _read_http_error(exc)
+                if exc.code == 404 and self._session_id is not None:
+                    raise SessionExpiredError(
+                        "Streamable HTTP session expired; reinitialization is required"
+                    ) from exc
                 if (
                     exc.code in _TRANSIENT_HTTP_CODES
                     and attempt + 1 < attempts
@@ -927,6 +1100,113 @@ class StreamableHttpMcpClient:
         raise DiscoveryError(
             f"HTTP MCP request timed out after {self.timeout:g} seconds: {safe_log_text(last_error)}"
         )
+
+    def _resume_sse_response(
+        self,
+        *,
+        request_id: int,
+        last_event_id: str | None,
+        retry_seconds: float | None,
+        deadline: float,
+        session_id: str | None,
+    ) -> dict[str, Any]:
+        if not last_event_id:
+            raise JsonRpcError(
+                f"SSE stream ended before JSON-RPC response id={request_id} and supplied no event id"
+            )
+        cursor = last_event_id
+        delay = retry_seconds
+        for _attempt in range(MAX_SSE_RECONNECTS):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if delay is not None:
+                if remaining <= delay:
+                    break
+                time.sleep(delay)
+                remaining = deadline - time.monotonic()
+            request = self._sse_get_request(
+                last_event_id=cursor,
+                session_id=session_id,
+            )
+            try:
+                with self._open(request, timeout=remaining) as response:
+                    headers = dict(response.headers.items())
+                    _require_content_type(headers, "text/event-stream")
+                    result = _consume_sse_stream(
+                        response,
+                        max_bytes=self.max_response_bytes,
+                        request_id=request_id,
+                        on_notification=self._handle_server_message,
+                    )
+            except urllib.error.HTTPError as exc:
+                exc.close()
+                raise DiscoveryError(
+                    f"SSE resumption failed with HTTP status {exc.code}"
+                ) from exc
+            except urllib.error.URLError as exc:
+                raise DiscoveryError(
+                    f"SSE resumption failed: {safe_log_text(exc.reason)}"
+                ) from exc
+            if result.message is not None:
+                return result.message
+            if result.last_event_id is None:
+                break
+            cursor = result.last_event_id
+            delay = result.retry_seconds
+        raise DiscoveryError(
+            f"SSE stream exceeded the {MAX_SSE_RECONNECTS} reconnect limit before response id={request_id}"
+        )
+
+    def _sse_get_request(
+        self,
+        *,
+        last_event_id: str | None,
+        session_id: str | None = None,
+    ) -> urllib.request.Request:
+        headers = self._headers(session_id=session_id)
+        headers["Accept"] = "text/event-stream"
+        headers.pop("Content-Type", None)
+        if last_event_id is not None:
+            headers["Last-Event-ID"] = last_event_id
+        return urllib.request.Request(self.url, method="GET", headers=headers)
+
+    def _handle_server_message(self, message: dict[str, Any]) -> None:
+        if _is_tools_list_changed_notification(message):
+            self._tools_changed_pending = True
+        server_response = _server_request_response(message)
+        if server_response is not None:
+            self._post_jsonrpc_message(server_response)
+
+    def _post_jsonrpc_message(self, payload: dict[str, Any]) -> None:
+        request = urllib.request.Request(
+            self.url,
+            data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+            method="POST",
+            headers=self._headers(),
+        )
+        try:
+            with self._open(request, timeout=self.timeout) as response:
+                if response.status not in {200, 202, 204}:
+                    raise DiscoveryError(
+                        f"HTTP JSON-RPC response returned unexpected status {response.status}"
+                    )
+                _read_limited(response, min(self.max_response_bytes, 64 * 1024))
+        except urllib.error.HTTPError as exc:
+            exc.close()
+            raise DiscoveryError(
+                f"HTTP JSON-RPC response failed: {exc.code}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise DiscoveryError(
+                f"HTTP JSON-RPC response failed: {safe_log_text(exc.reason)}"
+            ) from exc
+
+    def _take_tools_changed_notification(self) -> bool:
+        if not self._tools_changed_pending:
+            return False
+        self._tools_changed_pending = False
+        return True
 
     def _open(self, request: urllib.request.Request, *, timeout: float) -> Any:
         try:
@@ -981,6 +1261,7 @@ class StreamableHttpMcpClient:
             "capabilities": self.server_capabilities or {},
             "server_info": self.server_info or {},
             "authenticated": self.credential_provider is not None,
+            "session_recoveries": self._session_recoveries,
         }
 
 
@@ -1021,6 +1302,7 @@ def _discover_config_server(
     proxy_url: str | None,
     client_cert: str | None,
     client_key: str | None,
+    refresh_on_list_changed: float,
 ) -> SourceResult:
     if not isinstance(cfg, dict):
         raise DiscoveryError(f"Config for server '{safe_log_text(name)}' must be an object")
@@ -1077,6 +1359,7 @@ def _discover_config_server(
             proxy_url=proxy_url,
             client_cert=client_cert,
             client_key=client_key,
+            refresh_on_list_changed=refresh_on_list_changed,
         )
 
     if not allow_command_execution:
@@ -1116,6 +1399,11 @@ def _discover_config_server(
         protocol_version=protocol_version,
     ) as client:
         raw_tools = client.list_tools(max_tools=max_tools, max_pages=max_pages)
+        list_changed = False
+        if refresh_on_list_changed > 0:
+            list_changed = client.wait_for_tools_list_changed(refresh_on_list_changed)
+            if list_changed:
+                raw_tools = client.list_tools(max_tools=max_tools, max_pages=max_pages)
         protocol_metadata = client.discovery_metadata()
     return _source_from_raw_tools(
         server_name=name,
@@ -1125,6 +1413,8 @@ def _discover_config_server(
             "command": redact_command(command),
             "cwd": cwd,
             "compat_stdio_noise": compat_stdio_noise,
+            "list_changed_received": list_changed,
+            "refresh_count": int(list_changed),
             **protocol_metadata,
         },
     )
@@ -1176,6 +1466,97 @@ def _source_from_raw_tools(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _SseReadResult:
+    message: dict[str, Any] | None
+    last_event_id: str | None
+    retry_seconds: float | None
+
+
+def _consume_sse_stream(
+    response: Any,
+    *,
+    max_bytes: int,
+    request_id: int | None,
+    on_notification: Any = None,
+) -> _SseReadResult:
+    total_bytes = 0
+    event_count = 0
+    data_lines: list[str] = []
+    event_id: str | None = None
+    last_event_id: str | None = None
+    retry_seconds: float | None = None
+
+    def dispatch() -> dict[str, Any] | None:
+        nonlocal event_count, data_lines, event_id, last_event_id
+        if event_id is not None:
+            last_event_id = event_id
+        if not data_lines:
+            event_id = None
+            return None
+        text = "\n".join(data_lines)
+        data_lines = []
+        event_id = None
+        # The transport specification recommends an empty data event to flush
+        # HTTP headers before a long-running response. It carries no JSON-RPC
+        # message and must not consume the event budget.
+        if text == "":
+            return None
+        event_count += 1
+        if event_count > MAX_SSE_EVENTS:
+            raise JsonRpcError(f"SSE stream contains more than {MAX_SSE_EVENTS} events")
+        try:
+            message = strict_json_loads(text)
+        except InputValidationError as exc:
+            raise JsonRpcError(
+                f"SSE data is not valid JSON-RPC JSON: {safe_log_text(exc)}"
+            ) from exc
+        if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
+            raise JsonRpcError("SSE data must contain a JSON-RPC 2.0 object")
+        if "method" in message and on_notification is not None:
+            on_notification(message)
+            return None
+        if request_id is not None and message.get("id") == request_id:
+            _jsonrpc_result(message, request_id)
+            return message
+        return None
+
+    while True:
+        raw_line = response.readline(MAX_SSE_LINE_BYTES + 1)
+        if not isinstance(raw_line, bytes):
+            raise DiscoveryError("SSE response reader returned non-bytes data")
+        if len(raw_line) > MAX_SSE_LINE_BYTES:
+            raise DiscoveryError(f"SSE line exceeds {MAX_SSE_LINE_BYTES} bytes")
+        if not raw_line:
+            matched = dispatch()
+            return _SseReadResult(matched, last_event_id, retry_seconds)
+        total_bytes += len(raw_line)
+        if total_bytes > max_bytes:
+            raise DiscoveryError(f"SSE stream exceeds the {max_bytes} byte limit")
+        try:
+            line = raw_line.decode("utf-8").rstrip("\r\n")
+        except UnicodeDecodeError as exc:
+            raise JsonRpcError("SSE stream is not valid UTF-8") from exc
+        if line == "":
+            matched = dispatch()
+            if matched is not None:
+                return _SseReadResult(matched, last_event_id, retry_seconds)
+            continue
+        if line.startswith(":"):
+            continue
+        field, separator, value = line.partition(":")
+        if separator and value.startswith(" "):
+            value = value[1:]
+        if field == "data":
+            data_lines.append(value)
+        elif field == "id":
+            if "\x00" in value or len(value) > 4096:
+                raise JsonRpcError("SSE event id is invalid")
+            event_id = value
+        elif field == "retry" and re.fullmatch(r"[0-9]{1,9}", value):
+            retry_seconds = min(float(value) / 1000.0, MAX_RETRY_AFTER_SECONDS)
+
+
 def _parse_http_response(
     raw: bytes,
     headers: dict[str, str],
@@ -1223,6 +1604,86 @@ def _parse_http_response(
     if request_id is not None:
         _jsonrpc_result(message, request_id)
     return message
+
+
+def _content_type(headers: dict[str, str]) -> str:
+    return _header_value(headers, "content-type").split(";", 1)[0].strip().lower()
+
+
+def _require_content_type(headers: dict[str, str], expected: str) -> None:
+    actual = _content_type(headers)
+    if actual != expected:
+        raise JsonRpcError(
+            "Unsupported HTTP Content-Type: "
+            f"expected {expected}, received {safe_log_text(actual or '<missing>')}"
+        )
+
+
+def _decode_stdio_message(
+    raw_line: bytes,
+    *,
+    compat_stdio_noise: bool,
+) -> dict[str, Any] | None:
+    if len(raw_line) > MAX_STDIO_MESSAGE_BYTES:
+        raise JsonRpcError(
+            f"stdio JSON-RPC message exceeds the {MAX_STDIO_MESSAGE_BYTES} byte limit"
+        )
+    if not raw_line.endswith(b"\n"):
+        raise JsonRpcError("stdio JSON-RPC message is not newline-terminated")
+    try:
+        text = raw_line.decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise JsonRpcError("stdio stdout is not valid UTF-8") from exc
+    if not text:
+        if compat_stdio_noise:
+            return None
+        raise JsonRpcError("Non-JSON data received on strict stdio stdout")
+    try:
+        message = strict_json_loads(text)
+    except InputValidationError as exc:
+        # A line that appears intended as JSON is always an error. Compatibility
+        # mode is deliberately limited to bounded legacy log lines.
+        if text.startswith(("{", "[")):
+            raise JsonRpcError(
+                f"stdio stdout contained malformed JSON: {safe_log_text(exc)}"
+            ) from exc
+        if not compat_stdio_noise:
+            raise JsonRpcError("stdio stdout contained non-JSON data") from exc
+        return None
+    if not isinstance(message, dict):
+        if compat_stdio_noise:
+            return None
+        raise JsonRpcError("stdio JSON-RPC message must be an object")
+    return message
+
+
+def _is_tools_list_changed_notification(message: dict[str, Any]) -> bool:
+    return (
+        message.get("jsonrpc") == "2.0"
+        and message.get("method") == "notifications/tools/list_changed"
+        and "id" not in message
+    )
+
+
+def _server_request_response(message: dict[str, Any]) -> dict[str, Any] | None:
+    if "method" not in message or "id" not in message:
+        return None
+    request_id = message.get("id")
+    if (
+        message.get("jsonrpc") != "2.0"
+        or isinstance(request_id, bool)
+        or not isinstance(request_id, (int, float, str))
+        or isinstance(request_id, float) and not math.isfinite(request_id)
+        or not isinstance(message.get("method"), str)
+    ):
+        raise JsonRpcError("Server sent a malformed JSON-RPC request")
+    if message["method"] == "ping":
+        return {"jsonrpc": "2.0", "id": request_id, "result": {}}
+    return {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "error": {"code": -32601, "message": "Method not found"},
+    }
 
 
 def _jsonrpc_result(message: dict[str, Any], request_id: int) -> Any:
@@ -1285,6 +1746,14 @@ def _require_tools_capability(capabilities: dict[str, Any] | None) -> None:
         )
 
 
+def _require_list_changed_capability(capabilities: dict[str, Any] | None) -> None:
+    tools = capabilities.get("tools") if capabilities is not None else None
+    if not isinstance(tools, dict) or tools.get("listChanged") is not True:
+        raise UnsupportedFeatureError(
+            "unsupported_feature: server did not declare tools.listChanged=true"
+        )
+
+
 def _validate_tools_page(result: Any) -> tuple[list[Any], str | None]:
     if not isinstance(result, dict):
         raise JsonRpcError("tools/list returned a non-object result")
@@ -1299,6 +1768,17 @@ def _validate_tools_page(result: Any) -> tuple[list[Any], str | None]:
     if len(cursor_value) > 4096 or any(ord(char) < 32 for char in cursor_value):
         raise JsonRpcError("tools/list nextCursor is invalid")
     return page_tools, cursor_value
+
+
+def _validate_session_id(value: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 1024
+        or any(ord(char) < 32 or ord(char) == 127 for char in value)
+    ):
+        raise JsonRpcError("Mcp-Session-Id header is invalid")
+    return value
 
 
 def _read_limited(response: Any, limit: int) -> bytes:
@@ -1487,6 +1967,17 @@ def _validate_timeout(value: float) -> float:
     result = float(value)
     if not math.isfinite(result) or not 0.05 <= result <= MAX_TIMEOUT_SECONDS:
         raise DiscoveryError(f"timeout must be finite and in 0.05..{MAX_TIMEOUT_SECONDS:g}")
+    return result
+
+
+def _validate_optional_timeout(name: str, value: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise DiscoveryError(f"{name} must be a number")
+    result = float(value)
+    if not math.isfinite(result) or not 0 <= result <= MAX_TIMEOUT_SECONDS:
+        raise DiscoveryError(
+            f"{name} must be finite and in 0..{MAX_TIMEOUT_SECONDS:g}"
+        )
     return result
 
 

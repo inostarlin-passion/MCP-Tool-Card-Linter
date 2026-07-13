@@ -181,7 +181,7 @@ class LintReport:
     scan_id: str = ""
     report_schema: str = (
         "https://raw.githubusercontent.com/inostarlin-passion/"
-        "MCP-Tool-Card-Linter/v0.3.0/src/mcp_tool_card_linter/schemas/report.schema.json"
+        "MCP-Tool-Card-Linter/v0.4.0/src/mcp_tool_card_linter/schemas/report.schema.json"
     )
     report_schema_version: str = "1.0.0"
     policy: dict[str, Any] = field(default_factory=dict)

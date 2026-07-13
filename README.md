@@ -10,8 +10,8 @@ In this project, a "Tool Card" is an engineering concept: a reviewable bundle of
 - Checks: complete JSON Schema 2020-12 metaschema validation plus bounded security/quality rules, icon validation, full model-visible metadata scanning, tool poisoning, hidden Unicode, embedded credentials, cross-server tool shadowing, rug-pull fingerprints, dangerous parameters, side-effect labeling, and annotation conflicts.
 - Reports: report schema 1.0.0, deterministic JSON, Markdown, SARIF 2.1.0, JUnit XML, JSON Lines, GitHub annotations, stable rule metadata, SHA-256 card fingerprints, and approval/block suggestions.
 - Policy: production/security/spec/strict/compatibility profiles, select/ignore, severity overrides, and suppressions that require a reason, owner, and expiry date.
-- Defensive discovery: MCP 2025-11-25 and 2025-06-18 negotiation, capability gating, strict stdio, bounded I/O/concurrency/retries, SSRF-aware URL policy, disabled redirects, minimal child environments, process cleanup, and atomic private report files.
-- Remote credentials: pre-issued Bearer tokens from environment/private files, custom CA bundles, explicit proxies, and mTLS. OAuth Authorization Code/PKCE discovery is not yet implemented.
+- Defensive discovery: MCP 2025-11-25, 2025-06-18, and legacy 2025-03-26 negotiation, capability gating, strict stdio, bounded resumable Streamable HTTP/SSE, optional one-shot `tools/list_changed` refresh, bounded I/O/concurrency/retries, SSRF-aware URL policy, disabled redirects, minimal child environments, process cleanup, and atomic private report files.
+- Remote credentials: pre-issued Bearer tokens from environment/private files, custom CA bundles, explicit proxies, and mTLS; or MCP OAuth protected-resource/authorization-server discovery with Authorization Code, S256 PKCE, Resource Indicators, private single-use state, and private token output for a pre-registered public client.
 
 ## Quick Start
 
@@ -55,6 +55,13 @@ Streamable HTTP:
 mcp-toolsmith lint --server-url https://example.com/mcp --server example
 ```
 
+To wait for a declared `notifications/tools/list_changed` event and refresh the snapshot once:
+
+```bash
+mcp-toolsmith lint --server-url https://example.com/mcp --server example \
+  --refresh-on-list-changed 5
+```
+
 Authenticated Streamable HTTP without putting token text in process arguments:
 
 ```bash
@@ -62,6 +69,33 @@ export MCP_AUDIT_TOKEN='short-lived-resource-scoped-token'
 mcp-toolsmith lint --server-url https://example.com/mcp \
   --bearer-token-env MCP_AUDIT_TOKEN --server example
 ```
+
+OAuth Authorization Code + PKCE for a pre-registered public client is a two-process-safe flow. The
+callback URL is deliberately read from an environment variable or private file so the authorization
+code is not placed in process arguments:
+
+```bash
+mcp-toolsmith authorize start \
+  --server-url https://example.com/mcp \
+  --client-id registered-public-client \
+  --redirect-uri https://client.example/callback \
+  --state-file ~/.config/mcp-toolsmith/oauth-state.json \
+  --scope tools.read
+
+export MCP_CALLBACK_URL='https://client.example/callback?code=...&state=...'
+mcp-toolsmith authorize complete \
+  --state-file ~/.config/mcp-toolsmith/oauth-state.json \
+  --callback-url-env MCP_CALLBACK_URL \
+  --token-file ~/.config/mcp-toolsmith/access-token
+
+mcp-toolsmith lint --server-url https://example.com/mcp \
+  --bearer-token-file ~/.config/mcp-toolsmith/access-token
+```
+
+`authorize start` requires S256 support, uses the challenge scope before metadata fallback, includes
+the canonical MCP `resource` in both requests, and refuses non-HTTPS authorization endpoints by
+default. Dynamic Client Registration and refresh-token management are intentionally outside v0.4;
+register the public client and exact redirect URI with the authorization server first.
 
 ## Secure Discovery Defaults
 
@@ -206,28 +240,6 @@ Changed cards emit `TOOL_CARD_CHANGED`, are marked `baseline_status: changed`, a
 - Multi-server integrity: duplicate names within a server, cross-server same-name shadowing, deterministic card fingerprints, and baseline change detection.
 - Input schemas: external `$ref`, malformed types/composition/bounds/annotations, unrestricted extra properties, unbounded arrays/strings, permissive or nested-quantifier regexes, and unconstrained command/URL/path/secret fields.
 - Behavior claims: write/destructive/financial/network/filesystem/code-execution risk, missing approval/side-effect boundaries, and contradictory or invalid MCP annotation hints.
-
-## Rule Boundaries
-
-Facts:
-
-- MCP tool definitions include `name`, `description`, and `inputSchema`; they may also include `outputSchema` and `annotations`.
-- MCP uses JSON-RPC messages, and standard transports include stdio and Streamable HTTP.
-- MCP annotations are untrusted hints and are not proof of runtime behavior.
-- OpenAI's MCP documentation describes `allowed_tools` as a way to import only a subset of tools when a server exposes many tools, reducing tool payload cost and latency.
-
-Inferences:
-
-- Static checks for all model-visible metadata, schemas, side effects, and prompt-injection-like text can reduce review effort and catch common tool-card quality problems before an MCP server is connected to an agent.
-- Tools whose metadata suggests write, destructive, financial, network, or secret-related behavior should be reviewed more strictly and should usually require human approval in production clients.
-
-Uncertainties:
-
-- "Tool Card" is this project's term, not a formal MCP specification object.
-- A static linter cannot prove that an MCP server's runtime behavior matches its metadata.
-- A SHA-256 baseline detects change but does not authenticate the server or prevent a malicious first snapshot.
-- DNS validation has an unavoidable resolution/use race in this standard-library client; redirects are disabled and private addresses are rechecked before each request, but high-assurance server deployments should also enforce egress policy outside the process.
-- Different MCP clients may handle annotations, approvals, and tool filtering differently, so this report should complement sandboxing, permission controls, runtime audit logs, and human review.
 
 ## References
 

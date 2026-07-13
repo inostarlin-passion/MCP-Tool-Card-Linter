@@ -26,6 +26,8 @@ class SecurityPrimitiveTests(unittest.TestCase):
         with self.assertRaises(InputValidationError):
             strict_json_loads('{"score": NaN}')
         with self.assertRaises(InputValidationError):
+            strict_json_loads('{"score": 1e999}')
+        with self.assertRaises(InputValidationError):
             strict_json_loads('{"value": ' + "9" * 5000 + "}")
 
     def test_file_reader_enforces_byte_limit_and_utf8(self) -> None:

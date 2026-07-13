@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import math
 import os
 import re
 import socket
@@ -59,11 +60,18 @@ def strict_json_loads(text: str) -> Any:
     def reject_constant(value: str) -> Any:
         raise InputValidationError(f"Non-standard JSON number is not allowed: {value}")
 
+    def parse_finite_float(value: str) -> float:
+        result = float(value)
+        if not math.isfinite(result):
+            raise InputValidationError("JSON number is outside the finite float range")
+        return result
+
     try:
         return json.loads(
             text,
             object_pairs_hook=reject_duplicate_keys,
             parse_constant=reject_constant,
+            parse_float=parse_finite_float,
         )
     except DuplicateJsonKeyError:
         raise

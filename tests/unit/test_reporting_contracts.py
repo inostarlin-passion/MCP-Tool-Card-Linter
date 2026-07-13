@@ -70,7 +70,7 @@ class ReportingContractTests(unittest.TestCase):
         Draft202012Validator(schema, format_checker=FormatChecker()).validate(payload)
         self.assertEqual(payload["report_schema_version"], "1.0.0")
         self.assertTrue(payload["scan_id"].startswith("urn:sha256:"))
-        self.assertEqual(payload["tool_version"], "0.3.0")
+        self.assertEqual(payload["tool_version"], "0.4.0")
 
     def test_deterministic_json_is_byte_stable(self) -> None:
         self.assertEqual(report_to_json(_report()), report_to_json(_report()))

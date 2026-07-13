@@ -1,9 +1,9 @@
 # MCP Tool Card Linter Report
 
 - Report schema: `1.0.0`
-- Scan ID: `urn:sha256:19f14d75393ae4996b1c60eb862064313d26981095ff63baaefff9a1003cebf5`
+- Scan ID: `urn:sha256:9065578d29682d9e6b9193bdd8aee0b0687813367402051e65b7d77c23f0db57`
 - Generated: `1970-01-01T00:00:00+00:00`
-- Linter version: `0.3.0`
+- Linter version: `0.4.0`
 - Policy profile: `production`
 - Sources scanned: `1`
 - Tools scanned: `2`
@@ -38,11 +38,11 @@
 
 | Server | Type | Tools | Errors |
 | --- | --- | ---: | --- |
-| static | tools-file | 2 |  |
+| sample | tools-file | 2 |  |
 
 ## Tool Findings
 
-### `static` / `summarize_issue`
+### `sample` / `summarize_issue`
 
 - Score: `44/100`
 - Risk: `critical`
@@ -67,7 +67,7 @@ Recommendations:
 - Block this tool until the server owner removes instruction-like or secret-seeking metadata.
 - Replace dangerous free-form inputs with bounded structured values and enforce the same policy server-side.
 
-### `static` / `send`
+### `sample` / `send`
 
 - Score: `57/100`
 - Risk: `medium`

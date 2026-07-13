@@ -5,6 +5,34 @@ it moves toward 1.0. Deprecations are documented here before removal where secur
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-13
+
+### Added
+
+- Incremental Streamable HTTP SSE parsing, bounded reconnects, `retry` handling, GET resumption,
+  and `Last-Event-ID` propagation across interrupted POST responses.
+- Capability-gated `notifications/tools/list_changed` waiting and exactly-once snapshot refresh for
+  both stdio and Streamable HTTP discovery.
+- MCP OAuth protected-resource and authorization-server metadata discovery, Authorization Code
+  flow with mandatory S256 PKCE, RFC 8707 Resource Indicators, challenge-aware scope selection,
+  exact callback state/issuer checks, owner-only state/token files, and process-safe completion lock.
+- Integrity-locked official MCP conformance `initialize` and `sse-retry` scenarios in CI with a
+  dedicated fixture-restricted client adapter.
+- Unit, integration, and system coverage for v0.4 transport and OAuth workflows.
+
+### Changed
+
+- Version increased from 0.3.0 to 0.4.0 while report schema compatibility remains 1.0.0.
+- README now documents v0.4 discovery/OAuth usage and no longer contains the `Rule Boundaries`
+  section.
+
+### Security
+
+- OAuth authorization endpoints require HTTPS by default; callbacks require HTTPS or exact
+  `localhost`, credentials are never accepted in callback process arguments, and state is
+  single-use, expiring, owner-only, and concurrency locked.
+- SSE line, stream, event, reconnect, retry, and notification refresh work are all bounded.
+
 ## [0.3.0] - 2026-07-13
 
 ### Added
@@ -33,5 +61,6 @@ it moves toward 1.0. Deprecations are documented here before removal where secur
 - Environment proxy variables are not inherited implicitly; proxy routing requires `--proxy`.
 - Per-tool findings and SARIF results have explicit truncation limits and machine-readable markers.
 
-[Unreleased]: https://github.com/inostarlin-passion/MCP-Tool-Card-Linter/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/inostarlin-passion/MCP-Tool-Card-Linter/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/inostarlin-passion/MCP-Tool-Card-Linter/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/inostarlin-passion/MCP-Tool-Card-Linter/compare/v0.2.0...v0.3.0

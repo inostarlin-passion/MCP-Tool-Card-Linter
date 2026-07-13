@@ -3,6 +3,10 @@ import json
 import sys
 
 
+EMIT_LIST_CHANGED = "--emit-list-changed" in sys.argv[1:]
+list_changed_emitted = False
+
+
 PAGE_1 = [
     {
         "name": "search_customer_orders",
@@ -79,7 +83,7 @@ for line in sys.stdin:
                 "id": request_id,
                 "result": {
                     "protocolVersion": request.get("params", {}).get("protocolVersion"),
-                    "capabilities": {"tools": {"listChanged": False}},
+                    "capabilities": {"tools": {"listChanged": EMIT_LIST_CHANGED}},
                     "serverInfo": {"name": "mock-stdio", "version": "1.0.0"},
                 },
             }
@@ -87,12 +91,25 @@ for line in sys.stdin:
     elif method == "notifications/initialized":
         continue
     elif method == "tools/list":
+        global_list_changed = False
         cursor = request.get("params", {}).get("cursor")
         if cursor == "page-2":
             result = {"tools": PAGE_2}
+            global_list_changed = EMIT_LIST_CHANGED and not list_changed_emitted
         else:
             result = {"tools": PAGE_1, "nextCursor": "page-2"}
         write({"jsonrpc": "2.0", "id": request_id, "result": result})
+        if global_list_changed:
+            write({"jsonrpc": "2.0", "id": "server-ping", "method": "ping"})
+            write(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/tools/list_changed",
+                }
+            )
+            list_changed_emitted = True
+    elif method is None and request.get("id") == "server-ping":
+        continue
     else:
         write(
             {
@@ -101,4 +118,3 @@ for line in sys.stdin:
                 "error": {"code": -32601, "message": f"unknown method {method}"},
             }
         )
-
