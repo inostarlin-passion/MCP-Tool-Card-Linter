@@ -30,9 +30,9 @@ PYTHONWARNINGS=error::ResourceWarning PYTHONPATH=src \
 ```
 
 ```text
-Ran 100 tests in 26.228s
+Ran 100 tests in 22.366s
 OK
-TOTAL  3677 statements  768 missed  1542 branches  382 partial  75%
+TOTAL  3681 statements  770 missed  1544 branches  383 partial  75%
 ```
 
 `coverage.py` 开启 branch coverage、parallel data 和 subprocess patch；`coverage report --fail-under=75` 退出码为 0。重点模块：`rules.py` 96%、`models.py` 86%、`reporting.py` 84%、`oauth.py` 79%、`auth.py`/`lint.py` 78%、`cli.py`/`security.py` 77%、`policy.py` 76%、`discovery.py` 66%。较低覆盖集中在 transport/OAuth 的平台、TLS 与罕见 I/O 异常分支，已列入后续测试重点。
@@ -43,6 +43,7 @@ TOTAL  3677 statements  768 missed  1542 branches  382 partial  75%
 | --- | --- |
 | `ruff check src tests` | 通过 |
 | `mypy src`（strict） | 通过，12 个 source files 无问题 |
+| `mypy --platform win32 src` / `--platform linux` | 两个平台视图均通过，复现并关闭 Windows `os.killpg` 类型回归 |
 | `python -m compileall -q src tests` | 通过 |
 | `git diff --check` | 通过 |
 | `python -m build` | wheel 与 sdist 均成功：0.4.0 |
@@ -52,7 +53,15 @@ TOTAL  3677 statements  768 missed  1542 branches  382 partial  75%
 | `cyclonedx-py 7.3.0 environment` | 通过；从独立 product venv 生成有效 CycloneDX 1.6 SBOM（6 components） |
 | MCP official conformance 0.1.15 | 通过；client `initialize` + `sse-retry` 场景 2/2、规范检查 4/4、0 failures/warnings，npm lock integrity 固定 |
 
-说明：本地验证了 workflow 语法与其中关键命令，但没有伪造“远端 GitHub Actions 已运行”。3 OS × Python 3.11..3.14 矩阵、OIDC Trusted Publishing 和 attestation 必须在配置好 environment 的 GitHub 仓库中实际运行后才能最终确认。
+说明：已读取远端 GitHub Actions run `29263797177` 的 check/job 原始日志并在本地复现根因；本表的“通过”是对修复后本地代码的验证。修复尚未推送，不宣称新的 3 OS × Python 3.11..3.14 远端矩阵已通过。OIDC Trusted Publishing 和 attestation 也必须在配置好 environment 的 GitHub 仓库中实际运行后才能最终确认。
+
+## GitHub Actions 失败根因与回归
+
+| 远端失败 | 日志证据 | 修复 | 修复后本地证据 |
+| --- | --- | --- | --- |
+| Windows 3.11..3.14 `mypy src` | `discovery.py:2011: Module has no attribute killpg` | 以 `sys.platform` 在模块加载时选择 POSIX/Windows process-group helper | strict mypy 的本机、`win32`、`linux` 视图全通过 |
+| Linux/macOS oversized stdio | 期望 `exceeds`，实际 3 s timeout | `Popen` stdout/stderr 从 raw `bufsize=0` 改为 buffered；4 MiB line 和 8-message queue 上限不变 | 同一集成用例在 coverage 下 0.077 s 通过；全套通过 |
+| Python 3.12 performance | coverage + `tracemalloc` 下分别 26.84 s/19.16 s | coverage 仅验证 2,000-card 功能；独立 job 无 coverage 计时，再单独开 `tracemalloc` 测内存 | 无插桩时间 0.3068 s；单独内存峰值 1.75 MiB |
 
 ## 关键负向用例
 
@@ -87,10 +96,10 @@ TOTAL  3677 statements  768 missed  1542 branches  382 partial  75%
 
 ## 性能系统测试
 
-自动门限为 2,000 张 bounded、名称唯一的 cards，lint `<10 s` 且 tracemalloc peak `<128 MiB`。最终本机独立实测：
+自动门限为 2,000 张 bounded、名称唯一的 cards，lint `<10 s` 且 tracemalloc peak `<128 MiB`。coverage 套件仍执行同一 2,000-card 功能路径，但性能断言只在 `MCP_LINTER_ENFORCE_PERFORMANCE_BUDGET=1` 的独立无 coverage job 中生效；wall time 与 `tracemalloc` 内存为两次独立 lint，避免双 tracer 污染时间。最终本机实测：
 
 ```text
-tools=2000 lint_seconds=1.4029 peak_mib=5.98
+performance_budget tools=2000 elapsed_seconds=0.3068 peak_mib=1.75
 ```
 
 该结果不含 MCP server/network latency，也不是跨机器 SLA。完整 JSON Schema 元模式校验按 canonical schema 文本使用最多 1,024 项 LRU cache；攻击者控制的不同 schema 仍受 card/tool/schema traversal 上限约束。
@@ -107,7 +116,7 @@ tools=2000 lint_seconds=1.4029 peak_mib=5.98
 ## 未覆盖/测试不能证明
 
 - OAuth 使用本地 adversarial resource/authorization server，未连接外部身份提供商；未覆盖 DCR、Client ID Metadata Document、真实浏览器、refresh rotation、runtime step-up 或服务端 audience validation。
-- 远端 Linux/Windows/macOS CI 尚未在本次本地会话执行；尤其 Windows descendant cleanup 需要 Job Object 级覆盖。
+- 远端 run `29263797177` 已诊断，但修复后 Linux/Windows/macOS CI 尚未推送复验；尤其 Windows descendant cleanup 仍需要 Job Object 级覆盖。
 - 未做 fuzzing、mutation testing、长时间 soak、真实 proxy/企业 TLS interception或 DNS rebinding 竞态；SSE/list_changed 为 bounded snapshot workflow，不是长期 daemon subscription。
 - 未测试 runtime tool implementation/output、prompts/resources、source/SCA 或多步 toxic flow；本项目边界仍是 tool-card/static discovery gate。
 - 100 tests、75% branch coverage 和官方场景 2/2（检查 4/4）是当前证据，不等价于不存在缺陷或达到形式化验证/完整 SDK conformance。

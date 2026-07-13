@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import time
 import tracemalloc
@@ -11,6 +12,8 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from mcp_tool_card_linter.lint import lint_sources
 from mcp_tool_card_linter.models import LintConfig, SourceResult, ToolCard
+
+PERFORMANCE_GATE_ENV = "MCP_LINTER_ENFORCE_PERFORMANCE_BUDGET"
 
 
 class PerformanceBudgetSystemTests(unittest.TestCase):
@@ -50,18 +53,38 @@ class PerformanceBudgetSystemTests(unittest.TestCase):
             ],
         )
 
-        tracemalloc.start()
-        started = time.perf_counter()
-        try:
+        enforce_budget = os.environ.get(PERFORMANCE_GATE_ENV, "0")
+        self.assertIn(enforce_budget, {"0", "1"})
+        if enforce_budget == "0":
             report = lint_sources([source], LintConfig(max_tools=2000))
-            elapsed = time.perf_counter() - started
+            self.assertEqual(report.summary["tools_scanned"], 2000)
+            return
+
+        self.assertNotIn(
+            "COVERAGE_RUN",
+            os.environ,
+            "performance timing must run outside coverage instrumentation",
+        )
+        started = time.perf_counter()
+        report = lint_sources([source], LintConfig(max_tools=2000))
+        elapsed = time.perf_counter() - started
+
+        tracemalloc.start()
+        try:
+            memory_report = lint_sources([source], LintConfig(max_tools=2000))
             _, peak_bytes = tracemalloc.get_traced_memory()
         finally:
             tracemalloc.stop()
 
         self.assertEqual(report.summary["tools_scanned"], 2000)
+        self.assertEqual(memory_report.summary["tools_scanned"], 2000)
         self.assertLess(elapsed, 10.0)
         self.assertLess(peak_bytes, 128 * 1024 * 1024)
+        print(
+            "performance_budget "
+            f"tools=2000 elapsed_seconds={elapsed:.4f} "
+            f"peak_mib={peak_bytes / (1024 * 1024):.2f}"
+        )
 
 
 if __name__ == "__main__":

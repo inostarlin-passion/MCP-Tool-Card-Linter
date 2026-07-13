@@ -14,6 +14,7 @@
 6. 对照 2025/2026 MCP 安全与工具描述论文，以及公开 scanner 的 rug-pull/command-execution实践，区分“规范事实”“工程推断”和“仍不确定事项”。
 7. 针对 v0.3 生产化增量继续做多跳核验：MCP lifecycle→version/capability negotiation→tools capability；transport→stdio purity/SSE→Retry-After RFC；authorization→RFC 9728/8414/8707/PKCE；报告→SARIF 2.1.0→GitHub ingestion limits；发布→PyPI Trusted Publishing→OIDC/attestation；SBOM→CycloneDX Python 工具。
 8. 针对 v0.4 一致性增量复核 MCP Streamable HTTP 的空 `data` 预热事件、SSE `id`/`retry`、GET + `Last-Event-ID` 恢复和 `tools/list_changed`；再沿 MCP Authorization 跳转 RFC 9728、RFC 8414/OIDC discovery、RFC 7636、RFC 8707，并实际执行官方 conformance runner 0.1.15 的 2025-11-25 `initialize` 场景。
+9. 针对 GitHub Actions run `29263797177` 做“check→job→失败 step→原始日志”多跳定位；再以 Python raw/buffered I/O、`tracemalloc`、coverage.py 和 mypy 的官方文档复核短读、插桩开销与平台 typeshed 行为，避免用放宽 timeout 掩盖实现问题。
 
 优先级为：正式规范/RFC/标准库官方文档 > OWASP/CWE > 论文原文 > 开源实现说明。论文为预印本或经验研究时，不把其结论表述为协议保证。
 
@@ -89,7 +90,16 @@
     来源：[RFC 7636](https://www.rfc-editor.org/rfc/rfc7636.html)、[RFC 8707](https://www.rfc-editor.org/rfc/rfc8707.html)
 
 24. MCP 官方 conformance runner 会启动场景 server、把 URL 交给 client command、捕获交互并执行规范检查；`initialize` 验证版本、`clientInfo` 和响应处理，`sse-retry` 验证 graceful close 后 GET、`retry` 时序与 `Last-Event-ID`。v0.4 本地实际运行 integrity-locked 0.1.15，两个场景 2/2、规范检查 4/4 通过，并纳入 CI。
-    来源：[MCP Conformance](https://github.com/modelcontextprotocol/conformance)
+   来源：[MCP Conformance](https://github.com/modelcontextprotocol/conformance)
+
+25. Python 的 raw stream `read(size)` 允许在尚未 EOF 时返回少于请求的字节；官方文档同时说明 buffered I/O 在跨平台上提供更可预测的行为与性能。因此，对“以换行结束、有硬字节上限”的 stdio JSON-RPC 消息，应在 buffered pipe 上做限长 `readline`，而不应把 raw 短读视为完整消息。
+    来源：[Python `io` documentation](https://docs.python.org/3.14/library/io.html)
+
+26. coverage.py 通过追踪执行事件测量覆盖，官方文档明确指出这会施加速度开销；`tracemalloc` 又会在 Python allocator 上安装 hook 并产生 CPU/内存开销。因此 coverage + `tracemalloc` 同时开启时的 wall time 不能作为产品裸运行性能门限；功能覆盖、时间预算和内存预算需分层测量。
+    来源：[coverage.py source measurement](https://coverage.readthedocs.io/en/7.14.1/source.html)、[Python `tracemalloc`](https://docs.python.org/3/library/tracemalloc.html)
+
+27. mypy 默认使用当前运行平台的 typeshed 视图，并支持 `--platform` 显式复核其他平台。`os.killpg` 是 Unix API，因此即使运行时调用者有 `os.name` 判断，函数定义仍需使用 mypy 能识别的平台分支。
+    来源：[mypy platform configuration](https://mypy.readthedocs.io/en/stable/command_line.html#platform-configuration)、[Python `os.killpg`](https://docs.python.org/3/library/os.html#os.killpg)
 
 ## 从事实到实现的推理链
 
@@ -112,6 +122,8 @@
 | SSE 连接会正常中断且事件可能滞后 | 网络连接不是事务边界；恢复必须有游标、deadline 和重复上限 | 增量 parser；空预热事件；`id`/`retry`；GET + `Last-Event-ID`；总 timeout、3 次重连、行/body/event 上限 |
 | 工具目录可在扫描中变化 | 快照只有在消费变更通知后重取才与 server 当前声明一致 | 仅在 `tools.listChanged=true` 后等待；stdio/HTTP 共用精确通知判定；命中后 exactly-once re-list 并记录 metadata |
 | OAuth code/token 可被截获、替换或错发 audience | 授权必须把发起者、回调、issuer 和 resource 绑定到同一事务 | S256 PKCE、随机 state、可选 `iss` 校验、exact redirect、双请求 `resource`、0600 有期限 state、O_EXCL completion lock、token 不进 argv/URL/output |
+| raw pipe 可短读 | 消息边界必须由换行/EOF/字节上限决定，不能由单次 OS read 返回长度决定 | stdio stdout/stderr 使用 buffered pipe；JSON-RPC 仍限 4 MiB，队列仍限 8 条；超限立即受控失败 |
+| 观测工具会改变被观测系统 | 性能门限必须定义测量环境，否则就是测量 tracer 开销 | coverage 套件只验证 2,000-card 功能；独立无 coverage job 先测时间、再用 `tracemalloc` 单独测峰值内存 |
 
 ## 推断
 

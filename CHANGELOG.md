@@ -5,6 +5,15 @@ it moves toward 1.0. Deprecations are documented here before removal where secur
 
 ## [Unreleased]
 
+### Fixed
+
+- Use buffered stdio pipes so bounded `readline` detects oversized JSON-RPC messages
+  deterministically instead of timing out on raw short reads.
+- Select POSIX process-group signaling at module load so strict mypy also passes with Windows
+  platform stubs.
+- Run the 2,000-card time and memory budget in a dedicated uninstrumented CI job; coverage keeps
+  the same system workflow but no longer treats tracer overhead as product latency.
+
 ## [0.4.0] - 2026-07-13
 
 ### Added

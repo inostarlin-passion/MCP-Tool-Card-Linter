@@ -10,6 +10,7 @@ import signal
 import ssl
 import stat
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -376,7 +377,11 @@ class StdioMcpClient:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                bufsize=0,
+                # Raw FileIO reads may legally return short chunks.  A buffered
+                # pipe makes readline(size) consume up to the newline or the
+                # explicit size bound, so an oversized JSON-RPC line cannot be
+                # mistaken for a sequence of unrelated partial messages.
+                bufsize=-1,
                 start_new_session=os.name == "posix",
             )
         except OSError as exc:
@@ -2006,8 +2011,17 @@ def _signal_process_tree(proc: subprocess.Popen[bytes], sig: signal.Signals) -> 
         pass
 
 
-def _signal_process_group(pid: int, sig: signal.Signals) -> None:
-    try:
-        os.killpg(pid, sig)
-    except (OSError, ProcessLookupError):
-        pass
+if sys.platform == "win32":
+
+    def _signal_process_group(pid: int, sig: signal.Signals) -> None:
+        # Windows has no POSIX process-group signal API. Direct-child cleanup
+        # remains handled by Popen.terminate()/kill() in _signal_process_tree.
+        return
+
+else:
+
+    def _signal_process_group(pid: int, sig: signal.Signals) -> None:
+        try:
+            os.killpg(pid, sig)
+        except (OSError, ProcessLookupError):
+            pass

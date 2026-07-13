@@ -7,28 +7,28 @@
 | 质量方面 | 可执行验收标准 | 实现证据 | 测试/度量证据 | 结论 |
 | --- | --- | --- | --- | --- |
 | 输入校验 | 所有 CLI、JSON、TOML policy、config、URL、credential/OAuth、command/env、report/baseline、JSON-RPC/SSE 与 schema 输入在使用前校验类型、语法和语义 | strict JSON 拒绝重复 key、NaN/Infinity/float overflow、非法 UTF-8；OAuth metadata/resource/issuer/redirect/scope/state/token 全链校验；Bearer/callback 只读 env/私有文件；Draft 2020-12 元模式完整校验 | duplicate key、1e999、5,000 位整数、非法 UTF-8、header injection、0600、OAuth resource/state/issuer/PKCE、非法 schema/protocol/capability 均有负向用例 | 通过 |
-| 边界检查 | 攻击者控制的长度、数量、深度、队列、线程、分页、流事件、重连、重试、缓存、finding 和等待时间都有硬上限 | 10 MiB 文件、4 MiB HTTP/stdio、64 KiB SSE line、10,000 SSE events、3 reconnect、1 session recovery、8 条 stdout queue、100 行 stderr、tool/page/server/worker/schema/depth/card/retry/OAuth metadata/scope/state 上限；SARIF 25,000 results；JSON Schema LRU 1,024 | oversized HTTP/stdio、重复 cursor、SSE resume、session expiry、schema node/depth、finding/SARIF truncation、concurrency=33、2,000 cards budget | 通过 |
+| 边界检查 | 攻击者控制的长度、数量、深度、队列、线程、分页、流事件、重连、重试、缓存、finding 和等待时间都有硬上限 | 10 MiB 文件、4 MiB HTTP/stdio、64 KiB SSE line、10,000 SSE events、3 reconnect、1 session recovery、8 条 stdout queue、100 行 stderr、tool/page/server/worker/schema/depth/card/retry/OAuth metadata/scope/state 上限；stdio 使用 buffered 限长行读取；SARIF 25,000 results；JSON Schema LRU 1,024 | oversized HTTP/stdio、raw-pipe CI 回归、重复 cursor、SSE resume、session expiry、schema node/depth、finding/SARIF truncation、concurrency=33、2,000 cards budget | 通过 |
 | 异常处理 | 预期外部错误映射为稳定诊断和退出码；未知异常默认不泄露 traceback；单个 source 失败不吞掉其他 source | `DiscoveryError`、`JsonRpcError`、`UnsupportedFeatureError`、`SessionExpiredError`、`OAuthError`、`ReportError`、`InputValidationError`、`PolicyError`；顶层 bounded/redacted internal error | invalid JSON/SSE/OAuth metadata/callback/token、无 capability、HTTP 错误、partial config failure、atomic replace failure、CLI exit-code 回归 | 通过 |
 | 资源生命周期管理 | 初始化/授权中途失败也清理；进程、pipe、线程、HTTP response/error/session、OAuth lock 与临时文件在所有路径关闭 | stdio context rollback、POSIX process group terminate/kill、reader thread join、HTTP context/HTTPError close、session DELETE、atomic token/report temp cleanup、OAuth lock `finally` 释放、state 成功后删除 | 全套测试在 `ResourceWarning` 提升为 error 后 100/100 通过；failed-enter、replace failure、state mismatch/lock 专门覆盖 | 通过；Windows 任意脱离后代仍是已知限制 |
 | 并发控制 | 并发数有上限；共享 JSON-RPC round trip 不交错；背压队列有界；授权 code 不被并发兑换；失败隔离 | config `ThreadPoolExecutor` 为 1..32；stdio/HTTP request lock；stdout/stderr 有界 queue；OAuth `O_EXCL` completion lock；每个 future 独立收集 | 8 线程并发 request 最大 active=1；二次 state lock fail closed；过大 concurrency 拒绝；双 server 一坏一好仍保留安全结果 | 通过 |
-| 性能 | 常见规模近线性；重复 schema 校验可复用；最坏输入在分配/遍历前截断 | 单次 bounded metadata/schema traversal；canonical SHA-256；`Draft202012Validator.check_schema` 结果有界 LRU 缓存 | 2,000 cards 自动门限 `<10 s`/`<128 MiB`；本机 lint 实测 1.4029 s、peak 5.98 MiB | 通过（回归量级，不是跨机器 SLA） |
+| 性能 | 常见规模近线性；重复 schema 校验可复用；最坏输入在分配/遍历前截断；门限不在 coverage/tracemalloc 双重插桩下计时 | 单次 bounded metadata/schema traversal；canonical SHA-256；`Draft202012Validator.check_schema` 结果有界 LRU 缓存；时间与内存分开测量 | 独立无 coverage 的 2,000 cards 门限 `<10 s`/`<128 MiB`；本机 0.3068 s、peak 1.75 MiB | 通过（回归量级，不是跨机器 SLA） |
 | 韧性 | 兼容行为必须显式开启；暂态/断流/session 失效有限恢复且受总 deadline 约束；服务端等待建议不能无限阻塞 | stdio strict；tools/list 暂态 retry；`Retry-After` 与 SSE `retry` capped；POST SSE 断流 GET + Last-Event-ID；HTTP 404 仅重建 session 一次；cursor 去重 | 503→成功、POST→GET resume、session 404→reinitialize、server ping、重复 cursor、strict/compat stdio、unsupported capability、partial source failure | 通过 |
-| 可测试性 | 规则、policy、transport、OAuth/credential、report、security primitive 均有可直接调用边界；协议测试不依赖业务公网 | `lint_sources` 纯入口；provider 分层；本地 adversarial OAuth/HTTP/stdio fixtures；deterministic output；官方 conformance adapter | 100 tests：unit 61、integration 34、system 5；总分支覆盖率 75%，CI 门槛 75%；官方 initialize+sse-retry 场景 2/2、检查 4/4 | 通过 |
-| 可维护性 | 单一版本源、稳定规则目录/报告契约、类型/静态检查、变更和安全流程、可复现发布步骤齐备 | 0.4.0 单一 `__version__`；rule catalog/report schema 均保持 1.0.0；OAuth 与 transport helper 分层；协议矩阵、threat model、changelog | Ruff、strict mypy、compileall、diff check、wheel/sdist clean-install 全通过；CI 为 3 OS × Python 3.11..3.14 + integrity-locked MCP conformance | 通过；跨平台矩阵须由远端 CI 实际执行 |
+| 可测试性 | 规则、policy、transport、OAuth/credential、report、security primitive 均有可直接调用边界；协议测试不依赖业务公网；功能覆盖与性能门限分层 | `lint_sources` 纯入口；provider 分层；本地 adversarial OAuth/HTTP/stdio fixtures；deterministic output；官方 conformance adapter；独立无插桩性能 job | 100 tests：unit 61、integration 34、system 5；总分支覆盖率 75%，CI 门槛 75%；官方 initialize+sse-retry 场景 2/2、检查 4/4 | 通过 |
+| 可维护性 | 单一版本源、稳定规则目录/报告契约、类型/静态检查、变更和安全流程、可复现发布步骤齐备 | 0.4.0 单一 `__version__`；rule catalog/report schema 均保持 1.0.0；OAuth 与 transport helper 分层；协议矩阵、threat model、changelog | Ruff、strict mypy 本机/`win32`/`linux` 三视图、compileall、diff check、wheel/sdist clean-install 全通过；CI 为 3 OS × Python 3.11..3.14 + integrity-locked MCP conformance | 通过；新修复的跨平台矩阵须推送后由远端 CI 复验 |
 
 ## 协议、安全与供应链能力
 
 | 能力 | 实现 | 状态/边界 |
 | --- | --- | --- |
 | MCP 版本与能力 | 协商 2025-11-25/2025-06-18，并允许 2025-03-26 基础传输兼容；记录 requested/negotiated/capabilities；HTTP 后续 header 使用 negotiated；tools capability gate | 已实现；版本特定字段边界见 [PROTOCOL_COMPATIBILITY.md](PROTOCOL_COMPATIBILITY.md) |
-| stdio 纯净性 | stdout 默认只接受 JSON-RPC；兼容 noise 必须显式开启且有界 | 已实现 |
+| stdio 纯净性 | stdout 默认只接受 JSON-RPC；buffered 限长读取避免 raw short read；兼容 noise 必须显式开启且有界 | 已实现 |
 | Streamable HTTP | 增量 JSON/SSE、空 priming event、GET listener/resumption、Last-Event-ID、server ping、list_changed、session recovery/DELETE、禁 redirect、SSRF policy | 已实现 bounded tool discovery；不声明 sampling/roots/elicitation/tasks |
 | 认证/TLS | 预签发 Bearer env/0600 file、CA/proxy/mTLS；或 PRM/AS metadata + Authorization Code/S256 PKCE/Resource Indicator + 0600 state/token | 已实现预注册 public client；不实现 DCR、refresh rotation、自动 step-up/browser |
 | Schema/图标 | JSON Schema Draft 2020-12 完整元模式 + bounded quality/security rules；MCP icon 结构校验且不下载 | 已实现 |
 | tool poisoning/integrity | 全 model-visible metadata、hidden Unicode、secret、shadowing、完整 card SHA-256 baseline | 已实现启发式检测；baseline 本身未签名 |
 | 稳定报告 | Draft 2020-12 report schema、scan ID、JSON Pointer、rule metadata、deterministic JSON、SARIF/JUnit/JSONL/GitHub | 已实现；SARIF 达 25,000 results 时显式记录截断，消费端仍应施加自身 size 限制 |
 | 组织 policy | profile、select/ignore、severity override、带 reason/owner/expires 的 suppression；到期恢复 finding 并审计 | 已实现 |
-| CI/发布 | SHA 固定 Actions、3 OS/4 Python、coverage/type/static/build gate；Trusted Publishing、SHA-256、CycloneDX SBOM、provenance attestation | 配置和本地命令已验证；真正发布仍依赖仓库/PyPI environment 配置 |
+| CI/发布 | SHA 固定 Actions、3 OS/4 Python、coverage/type/static/build gate、独立无插桩性能 gate；Trusted Publishing、SHA-256、CycloneDX SBOM、provenance attestation | 修复已本地验证；新的远端 run 需推送后执行；真正发布仍依赖仓库/PyPI environment 配置 |
 
 ## 本地质量门禁
 
@@ -39,6 +39,10 @@ python -m coverage combine
 python -m coverage report --fail-under=75
 ruff check src tests
 mypy src
+mypy --platform win32 src
+mypy --platform linux src
+MCP_LINTER_ENFORCE_PERFORMANCE_BUDGET=1 PYTHONPATH=src \
+  python -m unittest tests.system.test_performance_budget -v
 python -m compileall -q src tests
 python -m build
 git diff --check
