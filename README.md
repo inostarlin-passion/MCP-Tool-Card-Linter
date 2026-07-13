@@ -105,6 +105,8 @@ register the public client and exact redirect URI with the authorization server 
 - remote endpoints require HTTPS except for an explicitly supplied loopback `--server-url`. Private/reserved destinations and loopback URLs loaded indirectly from config require `--allow-private-network`; non-loopback plain HTTP additionally requires `--allow-insecure-http`.
 - HTTP redirects are refused. Response bodies, stdio messages, stderr history, pagination, retries, server count, worker count, schemas, descriptions, and tool counts all have hard limits.
 - reports are written through a same-directory temporary file and atomic replacement. New report files default to owner-only permissions on POSIX.
+- programmatic stdio discovery accepts an argument sequence, which avoids shell quoting ambiguity. The `--stdio` string uses POSIX shell tokenization on Unix and the native Windows command-line parser on Windows.
+- OAuth state and token files use mode `0600` on POSIX. Windows uses the containing directory's inherited DACL, so keep those files in a directory restricted to the current user and administrators.
 
 These controls reduce accidental exposure; they are not a sandbox. A reviewed stdio command still runs with the linter process's operating-system identity and can access resources permitted to that identity.
 

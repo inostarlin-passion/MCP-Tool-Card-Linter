@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 import sys
 import tempfile
@@ -100,6 +101,15 @@ class _OAuthHandler(BaseHTTPRequestHandler):
 
 
 class OAuthPkceIntegrationTests(unittest.TestCase):
+    def assert_private_file_semantics(self, path: Path) -> None:
+        mode = path.stat().st_mode
+        self.assertTrue(stat.S_ISREG(mode))
+        # POSIX exposes authorization through mode bits. Windows authorization
+        # is represented by the file DACL inherited from the containing directory;
+        # st_mode only synthesizes read/write attributes and commonly reports 0666.
+        if os.name == "posix":
+            self.assertEqual(stat.S_IMODE(mode), 0o600)
+
     def setUp(self) -> None:
         _OAuthHandler.token_form = {}
         _OAuthHandler.advertise_s256 = True
@@ -136,7 +146,7 @@ class OAuthPkceIntegrationTests(unittest.TestCase):
             self.assertEqual(query["resource"], [_OAuthHandler.base_url + "/mcp"])
             self.assertEqual(query["scope"], ["tools.read optional.extra"])
             self.assertNotIn("code_verifier", query)
-            self.assertEqual(stat.S_IMODE(state_file.stat().st_mode), 0o600)
+            self.assert_private_file_semantics(state_file)
 
             callback = redirect + "?" + urllib.parse.urlencode(
                 {
@@ -155,7 +165,7 @@ class OAuthPkceIntegrationTests(unittest.TestCase):
 
             self.assertFalse(state_file.exists())
             self.assertEqual(token_file.read_text(encoding="utf-8"), "test-access-token-opaque\n")
-            self.assertEqual(stat.S_IMODE(token_file.stat().st_mode), 0o600)
+            self.assert_private_file_semantics(token_file)
             self.assertNotIn("test-access-token-opaque", json.dumps(completed))
             form = _OAuthHandler.token_form
             self.assertEqual(form["resource"], [_OAuthHandler.base_url + "/mcp"])

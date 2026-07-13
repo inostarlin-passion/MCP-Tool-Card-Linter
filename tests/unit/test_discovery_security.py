@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -15,10 +17,14 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 from mcp_tool_card_linter.discovery import (
+    MAX_WINDOWS_COMMAND_CHARS,
     DiscoveryError,
     JsonRpcError,
     StdioMcpClient,
     _build_http_opener,
+    _parse_stdio_command,
+    _split_windows_command_line,
+    _windows_command_units,
     discover_from_config,
     load_tools_file,
 )
@@ -154,6 +160,57 @@ class DiscoverySecurityTests(unittest.TestCase):
             StdioMcpClient([sys.executable], env={"TOKEN": 123})  # type: ignore[dict-item]
         with self.assertRaises(DiscoveryError):
             StdioMcpClient([sys.executable], timeout=math.nan)
+
+    def test_stdio_argument_sequence_is_preserved_without_shell_reparsing(self) -> None:
+        command = (
+            r"C:\Program Files\Python\python.exe",
+            r"D:\workspace with spaces\server.py",
+            "--label=a value with spaces",
+        )
+
+        self.assertEqual(_parse_stdio_command(command), list(command))
+
+    def test_windows_command_limit_counts_utf16_code_units(self) -> None:
+        self.assertEqual(_windows_command_units("plain"), 5)
+        self.assertEqual(_windows_command_units("\U0001f600"), 2)
+        oversized = "x " + "\U0001f600" * (MAX_WINDOWS_COMMAND_CHARS // 2)
+        with mock.patch("mcp_tool_card_linter.discovery.os.name", "nt"):
+            with self.assertRaisesRegex(DiscoveryError, "too long"):
+                _parse_stdio_command(oversized)
+
+    def test_stdio_command_parser_rejects_invalid_shapes_and_quoting(self) -> None:
+        with self.assertRaisesRegex(DiscoveryError, "empty"):
+            _parse_stdio_command("   ")
+        with self.assertRaisesRegex(DiscoveryError, "string or an argument sequence"):
+            _parse_stdio_command(object())  # type: ignore[arg-type]
+        with mock.patch("mcp_tool_card_linter.discovery.os.name", "posix"):
+            with self.assertRaisesRegex(DiscoveryError, "quoting"):
+                _parse_stdio_command("'unterminated")
+
+    def test_windows_serialized_argument_sequence_limit_is_enforced(self) -> None:
+        oversized = [sys.executable, *("\U0001f600" * 8192 for _ in range(3))]
+        with mock.patch("mcp_tool_card_linter.discovery.os.name", "nt"):
+            with self.assertRaisesRegex(DiscoveryError, "CreateProcess"):
+                _parse_stdio_command(oversized)
+
+    def test_windows_parser_reports_unavailable_native_api(self) -> None:
+        with mock.patch("ctypes.WinDLL", None, create=True):
+            with self.assertRaisesRegex(OSError, "unavailable"):
+                _split_windows_command_line("python server.py")
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows command-line APIs")
+    def test_windows_native_command_parser_round_trips_quoted_arguments(self) -> None:
+        command = [
+            sys.executable,
+            r"D:\workspace with spaces\server.py",
+            'embedded"quote',
+            "trailing\\",
+        ]
+
+        self.assertEqual(
+            _split_windows_command_line(subprocess.list2cmdline(command)),
+            command,
+        )
 
     def test_config_rejects_excessive_concurrency_before_allocating_threads(self) -> None:
         with self.assertRaises(DiscoveryError):

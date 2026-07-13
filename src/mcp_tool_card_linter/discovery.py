@@ -15,6 +15,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -49,6 +50,8 @@ MAX_CONFIG_SERVERS = 128
 MAX_COMMAND_ARGS = 256
 MAX_COMMAND_ARG_CHARS = 8192
 MAX_COMMAND_CHARS = 65_536
+# CreateProcessW permits 32,767 UTF-16 code units including the terminating NUL.
+MAX_WINDOWS_COMMAND_CHARS = 32_766
 MAX_ENV_VARS = 256
 MAX_ENV_VALUE_CHARS = 65_536
 MAX_ENV_TOTAL_CHARS = 1_048_576
@@ -117,7 +120,7 @@ def load_tools_file(
 
 
 def discover_from_stdio_command(
-    command_text: str,
+    command_value: str | Sequence[str],
     *,
     server_name: str = "stdio",
     timeout: float = 10.0,
@@ -130,14 +133,7 @@ def discover_from_stdio_command(
 ) -> SourceResult:
     _validate_server_name(server_name)
     _validate_optional_timeout("refresh_on_list_changed", refresh_on_list_changed)
-    if not isinstance(command_text, str) or not command_text.strip():
-        raise DiscoveryError("--stdio command is empty")
-    if len(command_text) > MAX_COMMAND_CHARS or "\x00" in command_text:
-        raise DiscoveryError("--stdio command is too long or contains a NUL byte")
-    try:
-        command = shlex.split(command_text)
-    except ValueError as exc:
-        raise DiscoveryError(f"Invalid --stdio command quoting: {safe_log_text(exc)}") from exc
+    command = _parse_stdio_command(command_value)
     with StdioMcpClient(
         command,
         timeout=timeout,
@@ -1856,7 +1852,102 @@ def _validate_command(command: list[str]) -> list[str]:
         raise DiscoveryError(
             f"stdio command exceeds the {MAX_COMMAND_CHARS} total character limit"
         )
+    if (
+        os.name == "nt"
+        and _windows_command_units(subprocess.list2cmdline(validated))
+        > MAX_WINDOWS_COMMAND_CHARS
+    ):
+        raise DiscoveryError(
+            "stdio command exceeds the Windows CreateProcess command-line limit"
+        )
     return validated
+
+
+def _parse_stdio_command(command_value: str | Sequence[str]) -> list[str]:
+    """Normalize a host command line without applying the wrong shell grammar."""
+
+    if isinstance(command_value, str):
+        if not command_value.strip():
+            raise DiscoveryError("--stdio command is empty")
+        maximum = MAX_WINDOWS_COMMAND_CHARS if os.name == "nt" else MAX_COMMAND_CHARS
+        command_length = (
+            _windows_command_units(command_value)
+            if os.name == "nt"
+            else len(command_value)
+        )
+        if command_length > maximum or "\x00" in command_value:
+            raise DiscoveryError("--stdio command is too long or contains a NUL byte")
+        try:
+            command = (
+                _split_windows_command_line(command_value)
+                if os.name == "nt"
+                else shlex.split(command_value)
+            )
+        except (OSError, ValueError) as exc:
+            raise DiscoveryError(
+                f"Invalid --stdio command quoting: {safe_log_text(exc)}"
+            ) from exc
+        return _validate_command(command)
+
+    if not isinstance(command_value, Sequence):
+        raise DiscoveryError("stdio command must be a command string or an argument sequence")
+    return _validate_command(list(command_value))
+
+
+def _windows_command_units(value: str) -> int:
+    """Count UTF-16 code units as required by CreateProcessW's limit."""
+
+    return len(value.encode("utf-16-le", errors="surrogatepass")) // 2
+
+
+def _split_windows_command_line(command_text: str) -> list[str]:
+    """Parse a CreateProcess command line using the Windows-owned parser.
+
+    CommandLineToArgvW allocates the returned vector with LocalAlloc. Keeping the
+    allocation and release in this small helper makes its lifecycle auditable and
+    prevents a Windows-only leak on validation failures.
+    """
+
+    import ctypes
+
+    win_dll = getattr(ctypes, "WinDLL", None)
+    get_last_error = getattr(ctypes, "get_last_error", None)
+    if win_dll is None or get_last_error is None:
+        raise OSError("Windows command-line APIs are unavailable")
+
+    argument_count = ctypes.c_int()
+    shell32 = win_dll("shell32", use_last_error=True)
+    command_line_to_argv = shell32.CommandLineToArgvW
+    command_line_to_argv.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.POINTER(ctypes.c_int),
+    ]
+    command_line_to_argv.restype = ctypes.POINTER(ctypes.c_wchar_p)
+    arguments = command_line_to_argv(command_text, ctypes.byref(argument_count))
+    if not arguments:
+        error_code = int(get_last_error())
+        raise OSError(error_code, "CommandLineToArgvW failed")
+
+    kernel32 = win_dll("kernel32", use_last_error=True)
+    local_free = kernel32.LocalFree
+    local_free.argtypes = [ctypes.c_void_p]
+    local_free.restype = ctypes.c_void_p
+    memory = ctypes.cast(arguments, ctypes.c_void_p)
+    try:
+        if argument_count.value > MAX_COMMAND_ARGS:
+            raise DiscoveryError(
+                f"stdio command has more than {MAX_COMMAND_ARGS} arguments"
+            )
+        parsed: list[str] = []
+        for index in range(argument_count.value):
+            argument = arguments[index]
+            if argument is None:
+                raise OSError("CommandLineToArgvW returned a null argument")
+            parsed.append(argument)
+        return parsed
+    finally:
+        if local_free(memory):
+            raise OSError("LocalFree failed for the parsed Windows command line")
 
 
 def _validate_env(env: dict[str, str]) -> dict[str, str]:

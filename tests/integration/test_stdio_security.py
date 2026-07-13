@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import shlex
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -22,6 +24,14 @@ FIXTURE = ROOT / "tests" / "fixtures" / "adversarial_mcp_stdio_server.py"
 class StdioSecurityIntegrationTests(unittest.TestCase):
     def command(self, mode: str) -> list[str]:
         return [sys.executable, str(FIXTURE), mode]
+
+    def command_text(self, mode: str) -> str:
+        command = self.command(mode)
+        return (
+            subprocess.list2cmdline(command)
+            if os.name == "nt"
+            else shlex.join(command)
+        )
 
     def test_failed_enter_closes_process_and_stderr_thread(self) -> None:
         client = StdioMcpClient(self.command("init_error"), timeout=2)
@@ -50,13 +60,13 @@ class StdioSecurityIntegrationTests(unittest.TestCase):
     def test_stdio_noise_is_rejected_by_default(self) -> None:
         with self.assertRaisesRegex(JsonRpcError, "non-JSON"):
             discover_from_stdio_command(
-                f"{sys.executable} {FIXTURE} noise",
+                self.command_text("noise"),
                 timeout=2,
             )
 
     def test_bounded_noise_is_skipped_only_in_compatibility_mode(self) -> None:
         result = discover_from_stdio_command(
-            f"{sys.executable} {FIXTURE} noise",
+            self.command_text("noise"),
             timeout=2,
             compat_stdio_noise=True,
         )
@@ -65,12 +75,12 @@ class StdioSecurityIntegrationTests(unittest.TestCase):
     def test_parent_secrets_are_not_inherited_without_explicit_opt_in(self) -> None:
         with mock.patch.dict(os.environ, {"MCP_TEST_SECRET": "should-not-leak"}):
             isolated = discover_from_stdio_command(
-                f"{sys.executable} {FIXTURE} environment",
+                self.command_text("environment"),
                 timeout=2,
                 inherit_env=False,
             )
             inherited = discover_from_stdio_command(
-                f"{sys.executable} {FIXTURE} environment",
+                self.command_text("environment"),
                 timeout=2,
                 inherit_env=True,
             )

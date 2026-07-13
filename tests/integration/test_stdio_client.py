@@ -14,7 +14,7 @@ class StdioClientIntegrationTests(unittest.TestCase):
     def test_discovers_paginated_tools_from_stdio_server(self) -> None:
         fixture = ROOT / "tests" / "fixtures" / "mock_mcp_stdio_server.py"
         result = discover_from_stdio_command(
-            f"{sys.executable} {fixture}",
+            [sys.executable, str(fixture)],
             server_name="mock",
             timeout=5,
             max_tools=10,
@@ -26,7 +26,7 @@ class StdioClientIntegrationTests(unittest.TestCase):
     def test_refreshes_once_after_declared_tools_list_changed_notification(self) -> None:
         fixture = ROOT / "tests" / "fixtures" / "mock_mcp_stdio_server.py"
         result = discover_from_stdio_command(
-            f"{sys.executable} {fixture} --emit-list-changed",
+            [sys.executable, str(fixture), "--emit-list-changed"],
             server_name="mock",
             timeout=5,
             max_tools=10,

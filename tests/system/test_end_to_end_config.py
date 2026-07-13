@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,46 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class EndToEndConfigTests(unittest.TestCase):
+    def test_cli_stdio_command_uses_host_quoting_rules(self) -> None:
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = str(ROOT / "src")
+        fixture = ROOT / "tests" / "fixtures" / "mock_mcp_stdio_server.py"
+        server_command = [sys.executable, str(fixture)]
+        command_text = (
+            subprocess.list2cmdline(server_command)
+            if os.name == "nt"
+            else shlex.join(server_command)
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "report.json"
+            lint = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "mcp_tool_card_linter",
+                    "lint",
+                    "--stdio",
+                    command_text,
+                    "--json-report",
+                    str(report_path),
+                    "--fail-on",
+                    "never",
+                    "--format",
+                    "none",
+                ],
+                cwd=ROOT,
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=20,
+                check=False,
+            )
+            self.assertEqual(lint.returncode, 0, lint.stderr)
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(report["summary"]["tools_scanned"], 2)
+
     def test_config_to_reports_and_optimizer(self) -> None:
         env = os.environ.copy()
         env["PYTHONPATH"] = str(ROOT / "src")
