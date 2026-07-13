@@ -263,7 +263,7 @@ def _resolve_addresses(host: str, port: int, resolve_hostnames: bool) -> list[ip
         ) from exc
     addresses: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
     for record in records:
-        raw_address = record[4][0]
+        raw_address = str(record[4][0])
         try:
             addresses.add(ipaddress.ip_address(raw_address.split("%", 1)[0]))
         except ValueError as exc:

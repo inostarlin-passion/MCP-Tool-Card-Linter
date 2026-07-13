@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/inostarlin-passion/MCP-Tool-Card-Linter/v0.3.0/src/mcp_tool_card_linter/schemas/report.schema.json",
+  "title": "MCP Tool Card Linter Report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "report_schema_version",
+    "rule_catalog_version",
+    "scan_id",
+    "generated_at",
+    "tool_version",
+    "version",
+    "policy",
+    "protocol",
+    "sources",
+    "summary",
+    "tools",
+    "facts",
+    "inferences",
+    "uncertainties"
+  ],
+  "properties": {
+    "$schema": {"type": "string", "format": "uri", "maxLength": 2048},
+    "report_schema_version": {"const": "1.0.0"},
+    "rule_catalog_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "scan_id": {"type": "string", "pattern": "^urn:(uuid:[0-9a-f-]{36}|sha256:[0-9a-f]{64})$"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "tool_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+"},
+    "version": {"type": "string", "description": "Deprecated alias for tool_version."},
+    "policy": {"type": "object"},
+    "protocol": {"type": "array", "maxItems": 128, "items": {"type": "object"}},
+    "sources": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["server_name", "source_type", "tools_discovered", "tools_linted", "truncated", "errors", "metadata"],
+        "properties": {
+          "server_name": {"type": "string", "minLength": 1, "maxLength": 512},
+          "source_type": {"type": "string", "minLength": 1, "maxLength": 128},
+          "tools_discovered": {"type": "integer", "minimum": 0},
+          "tools_linted": {"type": "integer", "minimum": 0},
+          "truncated": {"type": "boolean"},
+          "errors": {"type": "array", "items": {"type": "string"}, "maxItems": 1024},
+          "metadata": {"type": "object"}
+        }
+      }
+    },
+    "summary": {"type": "object"},
+    "tools": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": {"$ref": "#/$defs/tool"}
+    },
+    "facts": {"$ref": "#/$defs/stringArray"},
+    "inferences": {"$ref": "#/$defs/stringArray"},
+    "uncertainties": {"$ref": "#/$defs/stringArray"}
+  },
+  "$defs": {
+    "stringArray": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {"type": "string", "maxLength": 10000}
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["server_name", "tool_name", "score", "risk_level", "risk_categories", "estimated_card_chars", "card_fingerprint", "baseline_status", "issues", "recommendations"],
+      "properties": {
+        "server_name": {"type": "string", "minLength": 1, "maxLength": 512},
+        "tool_name": {"type": "string", "minLength": 1, "maxLength": 512},
+        "score": {"type": "integer", "minimum": 0, "maximum": 100},
+        "risk_level": {"enum": ["low", "medium", "high", "critical"]},
+        "risk_categories": {"$ref": "#/$defs/stringArray"},
+        "estimated_card_chars": {"type": "integer", "minimum": 0},
+        "card_fingerprint": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "baseline_status": {"enum": ["not_checked", "new", "unchanged", "changed"]},
+        "issues": {"type": "array", "maxItems": 1000, "items": {"$ref": "#/$defs/issue"}},
+        "recommendations": {"$ref": "#/$defs/stringArray"}
+      }
+    },
+    "issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "message", "path", "recommendation", "evidence", "json_pointer", "rule"],
+      "properties": {
+        "code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]+$"},
+        "severity": {"enum": ["info", "warning", "error", "critical"]},
+        "message": {"type": "string", "maxLength": 10000},
+        "path": {"type": "string", "maxLength": 10000},
+        "recommendation": {"type": "string", "maxLength": 10000},
+        "evidence": {"type": ["string", "null"], "maxLength": 10000},
+        "json_pointer": {"type": "string", "maxLength": 10000},
+        "rule": {"type": "object"}
+      }
+    }
+  }
+}

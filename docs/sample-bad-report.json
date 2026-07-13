@@ -1,14 +1,30 @@
 {
+  "$schema": "https://raw.githubusercontent.com/inostarlin-passion/MCP-Tool-Card-Linter/v0.3.0/src/mcp_tool_card_linter/schemas/report.schema.json",
   "facts": [
     "MCP tools are model-callable capabilities described by metadata such as name, description, and input schema.",
     "MCP uses JSON-RPC messages over transports such as stdio and Streamable HTTP.",
     "Tool metadata quality affects how an agent discovers, selects, and fills arguments for tools."
   ],
-  "generated_at": "2026-07-10T04:39:25.938754+00:00",
+  "generated_at": "1970-01-01T00:00:00+00:00",
   "inferences": [
     "Side-effect, schema, and prompt-injection checks are static heuristics; they reduce review effort but do not prove runtime safety.",
     "Tools with write, destructive, financial, network, or secret-related wording should require stricter human review by default."
   ],
+  "policy": {
+    "expired_suppression_count": 0,
+    "expired_suppressions": [],
+    "ignore": [],
+    "profile": "production",
+    "select": [],
+    "severity_overrides": {},
+    "source": null,
+    "suppressed_count": 0,
+    "suppressed_findings": []
+  },
+  "protocol": [],
+  "report_schema_version": "1.0.0",
+  "rule_catalog_version": "1.0.0",
+  "scan_id": "urn:sha256:19f14d75393ae4996b1c60eb862064313d26981095ff63baaefff9a1003cebf5",
   "sources": [
     {
       "errors": [],
@@ -56,6 +72,7 @@
     "sources_scanned": 1,
     "tools_scanned": 2
   },
+  "tool_version": "0.3.0",
   "tools": [
     {
       "baseline_status": "not_checked",
@@ -65,89 +82,253 @@
         {
           "code": "GENERIC_TOOL_NAME",
           "evidence": null,
+          "json_pointer": "/name",
           "message": "Tool name 'send' is too generic for reliable tool selection.",
           "path": "name",
           "recommendation": "Rename the tool to include the target domain and action, for example send_email or search_customer_orders.",
+          "rule": {
+            "auto_fix": false,
+            "category": "quality",
+            "confidence": "high",
+            "cwe": [],
+            "default_severity": "warning",
+            "id": "GENERIC_TOOL_NAME",
+            "introduced_in": "0.2.0",
+            "references": [
+              "https://modelcontextprotocol.io/specification/2025-11-25/server/tools"
+            ],
+            "title": "Generic Tool Name"
+          },
           "severity": "warning"
         },
         {
           "code": "DESCRIPTION_TOO_SHORT",
           "evidence": "Send message",
+          "json_pointer": "/description",
           "message": "Tool description is too short to guide reliable tool selection.",
           "path": "description",
           "recommendation": "Add purpose, usage boundary, important inputs, output shape, and side effects.",
+          "rule": {
+            "auto_fix": false,
+            "category": "quality",
+            "confidence": "high",
+            "cwe": [],
+            "default_severity": "warning",
+            "id": "DESCRIPTION_TOO_SHORT",
+            "introduced_in": "0.2.0",
+            "references": [
+              "https://modelcontextprotocol.io/specification/2025-11-25/server/tools"
+            ],
+            "title": "Description Too Short"
+          },
           "severity": "warning"
         },
         {
           "code": "MISSING_SIDE_EFFECT_WARNING",
           "evidence": null,
+          "json_pointer": "/description",
           "message": "Tool appears to have side effects but the description does not state them clearly.",
           "path": "description",
           "recommendation": "State whether the tool writes, sends, deletes, charges, calls external systems, and whether user confirmation is required.",
+          "rule": {
+            "auto_fix": false,
+            "category": "security",
+            "confidence": "high",
+            "cwe": [],
+            "default_severity": "warning",
+            "id": "MISSING_SIDE_EFFECT_WARNING",
+            "introduced_in": "0.2.0",
+            "references": [
+              "https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices",
+              "https://modelcontextprotocol.io/specification/2025-11-25/server/tools"
+            ],
+            "title": "Missing Side Effect Warning"
+          },
           "severity": "warning"
         },
         {
           "code": "MISSING_USAGE_BOUNDARY",
           "evidence": null,
+          "json_pointer": "/description",
           "message": "Risky tool lacks a clear usage boundary.",
           "path": "description",
           "recommendation": "Add when-to-use and when-not-to-use guidance, especially for drafting versus sending or read-only versus write operations.",
+          "rule": {
+            "auto_fix": false,
+            "category": "quality",
+            "confidence": "high",
+            "cwe": [
+              "CWE-400",
+              "CWE-770"
+            ],
+            "default_severity": "warning",
+            "id": "MISSING_USAGE_BOUNDARY",
+            "introduced_in": "0.2.0",
+            "references": [
+              "https://modelcontextprotocol.io/specification/2025-11-25/server/tools"
+            ],
+            "title": "Missing Usage Boundary"
+          },
           "severity": "warning"
         },
         {
           "code": "MISSING_REQUIRED_FIELDS",
           "evidence": null,
+          "json_pointer": "/inputSchema/required",
           "message": "Object schema has properties but no required list.",
           "path": "inputSchema.required",
           "recommendation": "Declare required parameters explicitly; use an empty list if every field is optional.",
+          "rule": {
+            "auto_fix": false,
+            "category": "quality",
+            "confidence": "high",
+            "cwe": [],
+            "default_severity": "warning",
+            "id": "MISSING_REQUIRED_FIELDS",
+            "introduced_in": "0.2.0",
+            "references": [
+              "https://modelcontextprotocol.io/specification/2025-11-25/server/tools"
+            ],
+            "title": "Missing Required Fields"
+          },
           "severity": "warning"
         },
         {
           "code": "ADDITIONAL_PROPERTIES_UNSPECIFIED",
           "evidence": null,
+          "json_pointer": "/inputSchema/additionalProperties",
           "message": "Object schema does not state whether extra parameters are allowed.",
           "path": "inputSchema.additionalProperties",
           "recommendation": "Set additionalProperties to false for strict tool arguments unless arbitrary keys are intentional.",
+          "rule": {
+            "auto_fix": false,
+            "category": "quality",
+            "confidence": "high",
+            "cwe": [],
+            "default_severity": "warning",
+            "id": "ADDITIONAL_PROPERTIES_UNSPECIFIED",
+            "introduced_in": "0.2.0",
+            "references": [
+              "https://modelcontextprotocol.io/specification/2025-11-25/server/tools"
+            ],
+            "title": "Additional Properties Unspecified"
+          },
           "severity": "warning"
         },
         {
           "code": "PARAMETER_DESCRIPTION_MISSING",
           "evidence": null,
+          "json_pointer": "/inputSchema/properties/to/description",
           "message": "Parameter 'to' has no description.",
           "path": "inputSchema.properties.to.description",
           "recommendation": "Explain accepted format, units, identifiers, and whether the parameter is optional.",
+          "rule": {
+            "auto_fix": false,
+            "category": "quality",
+            "confidence": "high",
+            "cwe": [],
+            "default_severity": "info",
+            "id": "PARAMETER_DESCRIPTION_MISSING",
+            "introduced_in": "0.2.0",
+            "references": [
+              "https://modelcontextprotocol.io/specification/2025-11-25/server/tools"
+            ],
+            "title": "Parameter Description Missing"
+          },
           "severity": "info"
         },
         {
           "code": "STRING_BOUND_RECOMMENDED",
           "evidence": null,
+          "json_pointer": "/inputSchema/properties/to",
           "message": "Free-form string parameter 'to' has no maxLength.",
           "path": "inputSchema.properties.to",
           "recommendation": "Add maxLength when large strings could increase latency, cost, or injection risk.",
+          "rule": {
+            "auto_fix": false,
+            "category": "quality",
+            "confidence": "medium",
+            "cwe": [
+              "CWE-400",
+              "CWE-770"
+            ],
+            "default_severity": "info",
+            "id": "STRING_BOUND_RECOMMENDED",
+            "introduced_in": "0.2.0",
+            "references": [
+              "https://modelcontextprotocol.io/specification/2025-11-25/server/tools"
+            ],
+            "title": "String Bound Recommended"
+          },
           "severity": "info"
         },
         {
           "code": "PARAMETER_DESCRIPTION_MISSING",
           "evidence": null,
+          "json_pointer": "/inputSchema/properties/msg/description",
           "message": "Parameter 'msg' has no description.",
           "path": "inputSchema.properties.msg.description",
           "recommendation": "Explain accepted format, units, identifiers, and whether the parameter is optional.",
+          "rule": {
+            "auto_fix": false,
+            "category": "quality",
+            "confidence": "high",
+            "cwe": [],
+            "default_severity": "warning",
+            "id": "PARAMETER_DESCRIPTION_MISSING",
+            "introduced_in": "0.2.0",
+            "references": [
+              "https://modelcontextprotocol.io/specification/2025-11-25/server/tools"
+            ],
+            "title": "Parameter Description Missing"
+          },
           "severity": "warning"
         },
         {
           "code": "STRING_BOUND_RECOMMENDED",
           "evidence": null,
+          "json_pointer": "/inputSchema/properties/msg",
           "message": "Free-form string parameter 'msg' has no maxLength.",
           "path": "inputSchema.properties.msg",
           "recommendation": "Add maxLength when large strings could increase latency, cost, or injection risk.",
+          "rule": {
+            "auto_fix": false,
+            "category": "quality",
+            "confidence": "medium",
+            "cwe": [
+              "CWE-400",
+              "CWE-770"
+            ],
+            "default_severity": "info",
+            "id": "STRING_BOUND_RECOMMENDED",
+            "introduced_in": "0.2.0",
+            "references": [
+              "https://modelcontextprotocol.io/specification/2025-11-25/server/tools"
+            ],
+            "title": "String Bound Recommended"
+          },
           "severity": "info"
         },
         {
           "code": "MISSING_OUTPUTSCHEMA",
           "evidence": null,
+          "json_pointer": "/outputSchema",
           "message": "outputSchema is missing.",
           "path": "outputSchema",
           "recommendation": "Provide outputSchema when the client should parse structured results reliably.",
+          "rule": {
+            "auto_fix": false,
+            "category": "quality",
+            "confidence": "high",
+            "cwe": [],
+            "default_severity": "warning",
+            "id": "MISSING_OUTPUTSCHEMA",
+            "introduced_in": "0.2.0",
+            "references": [
+              "https://modelcontextprotocol.io/specification/2025-11-25/server/tools"
+            ],
+            "title": "Missing Outputschema"
+          },
           "severity": "warning"
         }
       ],
@@ -173,49 +354,147 @@
         {
           "code": "MISSING_SIDE_EFFECT_WARNING",
           "evidence": null,
+          "json_pointer": "/description",
           "message": "Tool appears to have side effects but the description does not state them clearly.",
           "path": "description",
           "recommendation": "State whether the tool writes, sends, deletes, charges, calls external systems, and whether user confirmation is required.",
+          "rule": {
+            "auto_fix": false,
+            "category": "security",
+            "confidence": "high",
+            "cwe": [],
+            "default_severity": "warning",
+            "id": "MISSING_SIDE_EFFECT_WARNING",
+            "introduced_in": "0.2.0",
+            "references": [
+              "https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices",
+              "https://modelcontextprotocol.io/specification/2025-11-25/server/tools"
+            ],
+            "title": "Missing Side Effect Warning"
+          },
           "severity": "warning"
         },
         {
           "code": "MISSING_USAGE_BOUNDARY",
           "evidence": null,
+          "json_pointer": "/description",
           "message": "Risky tool lacks a clear usage boundary.",
           "path": "description",
           "recommendation": "Add when-to-use and when-not-to-use guidance, especially for drafting versus sending or read-only versus write operations.",
+          "rule": {
+            "auto_fix": false,
+            "category": "quality",
+            "confidence": "high",
+            "cwe": [
+              "CWE-400",
+              "CWE-770"
+            ],
+            "default_severity": "warning",
+            "id": "MISSING_USAGE_BOUNDARY",
+            "introduced_in": "0.2.0",
+            "references": [
+              "https://modelcontextprotocol.io/specification/2025-11-25/server/tools"
+            ],
+            "title": "Missing Usage Boundary"
+          },
           "severity": "warning"
         },
         {
           "code": "TOOL_POISONING_SECRET_EXFILTRATION",
           "evidence": "read ~/.ssh/id_rsa",
+          "json_pointer": "/description",
           "message": "Model-visible metadata contains instruction-like or secret-seeking text that may poison tool selection.",
           "path": "description",
           "recommendation": "Block this tool until reviewed; tool metadata appears to request unrelated secrets.",
+          "rule": {
+            "auto_fix": false,
+            "category": "security",
+            "confidence": "medium",
+            "cwe": [
+              "CWE-200",
+              "CWE-798"
+            ],
+            "default_severity": "critical",
+            "id": "TOOL_POISONING_SECRET_EXFILTRATION",
+            "introduced_in": "0.2.0",
+            "references": [
+              "https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices",
+              "https://modelcontextprotocol.io/specification/2025-11-25/server/tools"
+            ],
+            "title": "Tool Poisoning Secret Exfiltration"
+          },
           "severity": "critical"
         },
         {
           "code": "STRING_BOUND_RECOMMENDED",
           "evidence": null,
+          "json_pointer": "/inputSchema/properties/issue_url",
           "message": "Free-form string parameter 'issue_url' has no maxLength.",
           "path": "inputSchema.properties.issue_url",
           "recommendation": "Add maxLength when large strings could increase latency, cost, or injection risk.",
+          "rule": {
+            "auto_fix": false,
+            "category": "quality",
+            "confidence": "medium",
+            "cwe": [
+              "CWE-400",
+              "CWE-770"
+            ],
+            "default_severity": "info",
+            "id": "STRING_BOUND_RECOMMENDED",
+            "introduced_in": "0.2.0",
+            "references": [
+              "https://modelcontextprotocol.io/specification/2025-11-25/server/tools"
+            ],
+            "title": "String Bound Recommended"
+          },
           "severity": "info"
         },
         {
           "code": "URL_PARAMETER_ALLOWLIST_MISSING",
           "evidence": null,
+          "json_pointer": "/inputSchema/properties/issue_url",
           "message": "URL-like parameter 'issue_url' has no allowlist constraint.",
           "path": "inputSchema.properties.issue_url",
           "recommendation": "Constrain schemes and destinations with an allowlist and enforce SSRF protections server-side; format alone is not an allowlist.",
+          "rule": {
+            "auto_fix": false,
+            "category": "security",
+            "confidence": "high",
+            "cwe": [
+              "CWE-918"
+            ],
+            "default_severity": "warning",
+            "id": "URL_PARAMETER_ALLOWLIST_MISSING",
+            "introduced_in": "0.2.0",
+            "references": [
+              "https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices",
+              "https://modelcontextprotocol.io/specification/2025-11-25/server/tools"
+            ],
+            "title": "Url Parameter Allowlist Missing"
+          },
           "severity": "warning"
         },
         {
           "code": "MISSING_OUTPUTSCHEMA",
           "evidence": null,
+          "json_pointer": "/outputSchema",
           "message": "outputSchema is missing.",
           "path": "outputSchema",
           "recommendation": "Provide outputSchema when the client should parse structured results reliably.",
+          "rule": {
+            "auto_fix": false,
+            "category": "quality",
+            "confidence": "high",
+            "cwe": [],
+            "default_severity": "warning",
+            "id": "MISSING_OUTPUTSCHEMA",
+            "introduced_in": "0.2.0",
+            "references": [
+              "https://modelcontextprotocol.io/specification/2025-11-25/server/tools"
+            ],
+            "title": "Missing Outputschema"
+          },
           "severity": "warning"
         }
       ],
@@ -239,5 +518,5 @@
     "Tool Card is an engineering term in this project, not a formal MCP specification object.",
     "A static linter cannot verify whether server implementation behavior matches its metadata."
   ],
-  "version": "0.2.0"
+  "version": "0.3.0"
 }

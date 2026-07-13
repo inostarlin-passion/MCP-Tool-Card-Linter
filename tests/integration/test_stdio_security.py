@@ -47,10 +47,18 @@ class StdioSecurityIntegrationTests(unittest.TestCase):
             with self.assertRaisesRegex(JsonRpcError, "cursor repeated"):
                 client.list_tools(max_pages=3)
 
-    def test_bounded_noise_is_skipped_for_compatibility(self) -> None:
+    def test_stdio_noise_is_rejected_by_default(self) -> None:
+        with self.assertRaisesRegex(JsonRpcError, "non-JSON"):
+            discover_from_stdio_command(
+                f"{sys.executable} {FIXTURE} noise",
+                timeout=2,
+            )
+
+    def test_bounded_noise_is_skipped_only_in_compatibility_mode(self) -> None:
         result = discover_from_stdio_command(
             f"{sys.executable} {FIXTURE} noise",
             timeout=2,
+            compat_stdio_noise=True,
         )
         self.assertEqual(result.tools, [])
 

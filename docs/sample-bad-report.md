@@ -1,7 +1,10 @@
 # MCP Tool Card Linter Report
 
-- Generated: `2026-07-10T04:39:25.938754+00:00`
-- Linter version: `0.2.0`
+- Report schema: `1.0.0`
+- Scan ID: `urn:sha256:19f14d75393ae4996b1c60eb862064313d26981095ff63baaefff9a1003cebf5`
+- Generated: `1970-01-01T00:00:00+00:00`
+- Linter version: `0.3.0`
+- Policy profile: `production`
 - Sources scanned: `1`
 - Tools scanned: `2`
 - Average score: `50.5/100`

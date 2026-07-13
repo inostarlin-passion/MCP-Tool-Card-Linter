@@ -5,9 +5,15 @@ import hmac
 import json
 import math
 import re
+import uuid
 from collections import Counter, defaultdict
 from datetime import UTC, datetime
-from typing import Any, Iterable, Iterator, Mapping
+from functools import lru_cache
+from typing import Any, Iterable, Iterator, Mapping, TypeGuard
+from urllib.parse import urlsplit
+
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
 
 from . import __version__
 from .models import (
@@ -15,11 +21,13 @@ from .models import (
     BaselineStatus,
     LintConfig,
     LintReport,
+    Severity,
     SEVERITY_WEIGHTS,
     SourceResult,
     ToolCard,
     ToolReport,
 )
+from .policy import PolicyConfig
 from .security import safe_log_text
 
 GENERIC_TOOL_NAMES = {
@@ -80,6 +88,10 @@ CREDENTIAL_LITERAL = re.compile(
 )
 MAX_METADATA_SECURITY_FINDINGS = 64
 MAX_METADATA_SCAN_CHARS = 2_000_000
+MAX_TOOL_ICONS = 16
+MAX_ICON_SRC_CHARS = 128_000
+MAX_ICON_SIZES = 32
+MAX_ISSUES_PER_TOOL = 1_000
 PERMISSIVE_PATTERNS = {".*", "^.*$", ".+", "^.+$", "[\\s\\S]*", "^[\\s\\S]*$"}
 NESTED_REGEX_QUANTIFIER = re.compile(
     r"\((?:[^()\\]|\\.)*(?:\*|\+|\{\d+,?\d*\})(?:[^()\\]|\\.)*\)"
@@ -192,15 +204,45 @@ UNCERTAINTIES = [
 ]
 
 
+class _BoundedIssueList(list[Issue]):
+    """Reserve the final slot for an explicit truncation finding."""
+
+    def append(self, issue: Issue) -> None:
+        if len(self) < MAX_ISSUES_PER_TOOL - 1:
+            super().append(issue)
+            return
+        if len(self) == MAX_ISSUES_PER_TOOL - 1:
+            super().append(
+                Issue(
+                    code="FINDING_LIMIT_REACHED",
+                    severity="error",
+                    path="$",
+                    message=(
+                        f"Tool produced at least {MAX_ISSUES_PER_TOOL} findings; "
+                        "additional findings were omitted."
+                    ),
+                    recommendation=(
+                        "Reduce the tool-card/schema size, fix the reported structural "
+                        "errors, and scan again before approval."
+                    ),
+                )
+            )
+
+
 def lint_sources(
     sources: Iterable[SourceResult],
     config: LintConfig,
     *,
     baseline_fingerprints: Mapping[tuple[str, str], str] | None = None,
+    policy: PolicyConfig | None = None,
+    deterministic: bool = False,
 ) -> LintReport:
     source_list = list(sources)
+    policy_config = policy or PolicyConfig()
     tool_reports: list[ToolReport] = []
     source_summaries: list[dict[str, Any]] = []
+    suppressed_findings: list[dict[str, str]] = []
+    expired_suppressions: list[dict[str, str]] = []
 
     bounded_by_source = {
         id(source): source.tools[: config.max_tools] for source in source_list
@@ -230,6 +272,9 @@ def lint_sources(
                     cross_server_names,
                     config,
                     baseline_fingerprints,
+                    policy_config,
+                    suppressed_findings,
+                    expired_suppressions,
                 )
             )
         source_summaries.append(
@@ -249,16 +294,37 @@ def lint_sources(
         tool_reports,
         baseline_fingerprints=baseline_fingerprints,
     )
-    return LintReport(
-        generated_at=datetime.now(UTC).isoformat(),
+    protocol = [
+        {
+            "server_name": source.server_name,
+            "requested": source.metadata.get("protocol_requested"),
+            "negotiated": source.metadata.get("protocol_negotiated"),
+            "capabilities": source.metadata.get("capabilities", {}),
+            "server_info": source.metadata.get("server_info", {}),
+        }
+        for source in source_list
+        if source.metadata.get("protocol_requested") is not None
+    ]
+    generated_at = (
+        "1970-01-01T00:00:00+00:00" if deterministic else datetime.now(UTC).isoformat()
+    )
+    report = LintReport(
+        generated_at=generated_at,
         version=__version__,
         sources=source_summaries,
         summary=summary,
         tools=tool_reports,
+        policy=policy_config.report_summary(
+            suppressed=suppressed_findings,
+            expired=expired_suppressions,
+        ),
+        protocol=protocol,
         facts=FACTS,
         inferences=INFERENCES,
         uncertainties=UNCERTAINTIES,
     )
+    report.scan_id = _scan_id(report, deterministic=deterministic)
+    return report
 
 
 def _lint_tool(
@@ -267,8 +333,11 @@ def _lint_tool(
     cross_server_names: set[str],
     config: LintConfig,
     baseline_fingerprints: Mapping[tuple[str, str], str] | None,
+    policy: PolicyConfig,
+    suppressed_findings: list[dict[str, str]],
+    expired_suppressions: list[dict[str, str]],
 ) -> ToolReport:
-    issues: list[Issue] = []
+    issues: list[Issue] = _BoundedIssueList()
     report_server_name = safe_log_text(tool.server_name, limit=512)
     report_tool_name = safe_log_text(tool.display_name, limit=512)
     canonical_card = _canonical_card_text(tool)
@@ -332,6 +401,15 @@ def _lint_tool(
     )
     _check_annotations(tool, risk_categories, issues)
     _check_card_size(estimated_card_chars, config, issues)
+
+    application = policy.apply(
+        issues,
+        server=report_server_name,
+        tool=report_tool_name,
+    )
+    issues = application.issues
+    suppressed_findings.extend(application.suppressed)
+    expired_suppressions.extend(application.expired)
 
     risk_level = _risk_level(risk_categories, issues)
     recommendations = _recommendations(tool, risk_categories, issues)
@@ -416,6 +494,113 @@ def _check_raw_shape(tool: ToolCard, issues: list[Issue]) -> None:
                 recommendation="Use a short human-readable title or omit it.",
             )
         )
+    _check_icons(raw.get("icons"), issues)
+
+
+def _check_icons(value: Any, issues: list[Issue]) -> None:
+    if value is None:
+        return
+    if not isinstance(value, list):
+        issues.append(
+            Issue(
+                code="INVALID_TOOL_ICONS",
+                severity="error",
+                path="icons",
+                message="Tool icons must be an array.",
+                recommendation="Publish a bounded array of MCP Icon objects or omit icons.",
+            )
+        )
+        return
+    if len(value) > MAX_TOOL_ICONS:
+        issues.append(
+            Issue(
+                code="TOO_MANY_TOOL_ICONS",
+                severity="warning",
+                path="icons",
+                message=f"Tool exposes more than {MAX_TOOL_ICONS} icons.",
+                recommendation="Keep only the bounded icon variants clients actually need.",
+            )
+        )
+    for index, icon in enumerate(value[:MAX_TOOL_ICONS]):
+        path = f"icons[{index}]"
+        if not isinstance(icon, dict):
+            issues.append(
+                Issue(
+                    code="INVALID_TOOL_ICONS",
+                    severity="error",
+                    path=path,
+                    message="Each tool icon must be an object.",
+                    recommendation="Use an Icon object with src and optional mimeType, sizes, and theme.",
+                )
+            )
+            continue
+        src = icon.get("src")
+        valid_src = False
+        if isinstance(src, str) and 1 <= len(src) <= MAX_ICON_SRC_CHARS:
+            try:
+                parsed = urlsplit(src)
+                valid_src = parsed.scheme in {"http", "https", "data"}
+                if parsed.scheme in {"http", "https"}:
+                    valid_src = bool(parsed.hostname) and parsed.username is None and parsed.password is None
+                elif parsed.scheme == "data":
+                    header = src.partition(",")[0].lower()
+                    valid_src = ";base64" in header and header.startswith("data:image/")
+            except ValueError:
+                valid_src = False
+        if not valid_src:
+            issues.append(
+                Issue(
+                    code="INVALID_TOOL_ICON_SRC",
+                    severity="error",
+                    path=f"{path}.src",
+                    message="Icon src must be a bounded HTTP(S) URI or base64 image data URI without credentials.",
+                    recommendation="Use a same-origin HTTPS image URL or a bounded base64 data URI.",
+                )
+            )
+        mime_type = icon.get("mimeType")
+        if mime_type is not None and (
+            not isinstance(mime_type, str)
+            or not re.fullmatch(r"image/[A-Za-z0-9.+-]{1,64}", mime_type)
+        ):
+            issues.append(
+                Issue(
+                    code="INVALID_TOOL_ICON_MIME_TYPE",
+                    severity="warning",
+                    path=f"{path}.mimeType",
+                    message="Icon mimeType is not a bounded image media type.",
+                    recommendation="Use image/png, image/jpeg, image/webp, image/svg+xml, or omit mimeType.",
+                )
+            )
+        sizes = icon.get("sizes")
+        if sizes is not None and (
+            not isinstance(sizes, list)
+            or len(sizes) > MAX_ICON_SIZES
+            or any(
+                not isinstance(size, str)
+                or not re.fullmatch(r"(?:any|[1-9][0-9]{0,4}x[1-9][0-9]{0,4})", size)
+                for size in sizes
+            )
+        ):
+            issues.append(
+                Issue(
+                    code="INVALID_TOOL_ICON_SIZE",
+                    severity="warning",
+                    path=f"{path}.sizes",
+                    message="Icon sizes must be a bounded array of WxH values or 'any'.",
+                    recommendation="Use values such as 48x48, 96x96, or any for scalable icons.",
+                )
+            )
+        theme = icon.get("theme")
+        if theme is not None and theme not in {"light", "dark"}:
+            issues.append(
+                Issue(
+                    code="INVALID_TOOL_ICONS",
+                    severity="warning",
+                    path=f"{path}.theme",
+                    message="Icon theme must be light or dark.",
+                    recommendation="Use a standardized theme value or omit it.",
+                )
+            )
 
 
 def _check_name(
@@ -457,6 +642,18 @@ def _check_name(
                 path="name",
                 message="Tool name contains whitespace or unusual characters.",
                 recommendation="Prefer stable ASCII identifiers such as search_customer_orders.",
+                evidence=name,
+            )
+        )
+
+    if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?", name):
+        issues.append(
+            Issue(
+                code="TOOL_NAME_SPEC_VIOLATION",
+                severity="warning",
+                path="name",
+                message="Tool name does not follow the MCP 2025-11-25 name guidance.",
+                recommendation="Use ASCII letters, digits, underscores, hyphens, and dots, beginning and ending with an alphanumeric character.",
                 evidence=name,
             )
         )
@@ -551,7 +748,9 @@ def _check_description(
         )
 
     if _is_side_effect_risk(risk_categories) and not SIDE_EFFECT_TERMS.search(desc):
-        severity = "error" if {"destructive", "financial"} & risk_categories else "warning"
+        severity: Severity = (
+            "error" if {"destructive", "financial"} & risk_categories else "warning"
+        )
         issues.append(
             Issue(
                 code="MISSING_SIDE_EFFECT_WARNING",
@@ -577,7 +776,7 @@ def _check_description(
 def _iter_model_visible_strings(
     raw: dict[str, Any], config: LintConfig
 ) -> Iterator[tuple[str, str]]:
-    roots = []
+    roots: list[tuple[str, Any, int]] = []
     for key in (
         "name",
         "title",
@@ -695,7 +894,7 @@ def _check_metadata_security(
 
 
 def _check_schema(
-    schema: dict[str, Any] | None,
+    schema: Any,
     path: str,
     *,
     required: bool,
@@ -704,7 +903,7 @@ def _check_schema(
     check_parameter_quality: bool,
 ) -> None:
     if schema is None:
-        severity = "error" if required else "warning"
+        severity: Severity = "error" if required else "warning"
         issues.append(
             Issue(
                 code=f"MISSING_{path.upper()}",
@@ -732,6 +931,44 @@ def _check_schema(
         )
         return
 
+    if _schema_within_meta_validation_budget(schema, config):
+        try:
+            schema_text = json.dumps(
+                schema,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            validation_error = _metaschema_validation_error(schema_text)
+        except (TypeError, ValueError, RecursionError):
+            validation_error = (
+                "Schema could not be represented as strict JSON for metaschema validation.",
+                "",
+            )
+        if validation_error is not None:
+            error_message, schema_path = validation_error
+            issues.append(
+                Issue(
+                    code="INVALID_JSON_SCHEMA_2020_12",
+                    severity="error",
+                    path=f"{path}.{schema_path}" if schema_path else path,
+                    message="Schema does not conform to the JSON Schema 2020-12 metaschema.",
+                    recommendation="Correct the schema using a Draft 2020-12 validator before publishing it.",
+                    evidence=_trim(safe_log_text(error_message, limit=500)),
+                )
+            )
+    else:
+        issues.append(
+            Issue(
+                code="SCHEMA_META_VALIDATION_SKIPPED",
+                severity="info",
+                path=path,
+                message="Draft 2020-12 metaschema validation was skipped because the schema exceeds the configured traversal budget.",
+                recommendation="Reduce schema complexity, then validate it with the complete metaschema validator.",
+            )
+        )
+
     state = {
         "count": 0,
         "depth_issue": False,
@@ -748,6 +985,38 @@ def _check_schema(
         check_parameter_quality=check_parameter_quality,
         is_root=True,
     )
+
+
+def _schema_within_meta_validation_budget(schema: dict[str, Any], config: LintConfig) -> bool:
+    stack: list[tuple[Any, int]] = [(schema, 0)]
+    seen: set[int] = set()
+    count = 0
+    while stack:
+        value, depth = stack.pop()
+        if depth > config.max_schema_depth:
+            return False
+        if isinstance(value, (dict, list)):
+            identity = id(value)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            count += 1
+            if count > config.max_schema_properties:
+                return False
+            children = value.values() if isinstance(value, dict) else value
+            stack.extend((child, depth + 1) for child in children)
+    return True
+
+
+@lru_cache(maxsize=1024)
+def _metaschema_validation_error(schema_text: str) -> tuple[str, str] | None:
+    schema = json.loads(schema_text)
+    try:
+        Draft202012Validator.check_schema(schema)
+    except SchemaError as exc:
+        path = ".".join(str(part) for part in exc.absolute_schema_path)
+        return exc.message, path
+    return None
 
 
 def _walk_schema(
@@ -1432,7 +1701,7 @@ def _check_regex_risk(pattern: str, path: str, issues: list[Issue]) -> None:
         )
 
 
-def _is_finite_number(value: Any) -> bool:
+def _is_finite_number(value: Any) -> TypeGuard[int | float]:
     return (
         not isinstance(value, bool)
         and isinstance(value, (int, float))
@@ -1447,7 +1716,9 @@ def _check_parameter(
         return
     description = prop_schema.get("description")
     if not isinstance(description, str) or not description.strip():
-        severity = "warning" if prop_name.lower() in AMBIGUOUS_PARAM_NAMES else "info"
+        severity: Severity = (
+            "warning" if prop_name.lower() in AMBIGUOUS_PARAM_NAMES else "info"
+        )
         issues.append(
             Issue(
                 code="PARAMETER_DESCRIPTION_MISSING",
@@ -1828,6 +2099,26 @@ def _canonical_card_text(tool: ToolCard) -> str:
 def _card_fingerprint(canonical: str) -> str:
     digest = hashlib.sha256(canonical.encode("utf-8", errors="replace")).hexdigest()
     return f"sha256:{digest}"
+
+
+def _scan_id(report: LintReport, *, deterministic: bool) -> str:
+    if not deterministic:
+        return f"urn:uuid:{uuid.uuid4()}"
+    payload = {
+        "tool_version": report.version,
+        "sources": report.sources,
+        "tools": [tool.to_dict() for tool in report.tools],
+        "policy": report.policy,
+        "protocol": report.protocol,
+    }
+    raw = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return f"urn:sha256:{hashlib.sha256(raw).hexdigest()}"
 
 
 def _summarize(

@@ -1,0 +1,15 @@
+[mcp-tool-card-linter]
+profile = "production"
+select = ["*"]
+ignore = ["STRING_BOUND_RECOMMENDED"]
+
+[mcp-tool-card-linter.rules.TOOL_NAME_SPEC_VIOLATION]
+severity = "error"
+
+[[mcp-tool-card-linter.suppressions]]
+server = "legacy-server"
+tool = "legacy_lookup"
+rule = "DESCRIPTION_TOO_SHORT"
+reason = "Legacy compatibility exception tracked in issue SEC-123."
+owner = "platform-security"
+expires = 2026-12-31

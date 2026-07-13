@@ -7,16 +7,22 @@ import queue
 import re
 import shlex
 import signal
+import ssl
+import stat
 import subprocess
 import threading
 import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 from . import __version__
+from .auth import CredentialProvider
 from .models import MAX_LINT_TOOLS, SourceResult, ToolCard
 from .security import (
     MAX_HTTP_ERROR_BYTES,
@@ -30,7 +36,8 @@ from .security import (
     validate_mcp_url,
 )
 
-MCP_PROTOCOL_VERSION = "2025-11-25"
+SUPPORTED_MCP_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18")
+MCP_PROTOCOL_VERSION = SUPPORTED_MCP_PROTOCOL_VERSIONS[0]
 MAX_STDERR_LINES = 100
 MAX_STDERR_LINE_BYTES = 4096
 MAX_STDIO_MESSAGE_BYTES = 4 * 1024 * 1024
@@ -48,6 +55,7 @@ MAX_PAGES_LIMIT = 10_000
 MAX_RESPONSE_BYTES_LIMIT = 16 * 1024 * 1024
 MAX_TIMEOUT_SECONDS = 300.0
 MAX_HTTP_RETRIES = 3
+MAX_RETRY_AFTER_SECONDS = 30.0
 _TRANSIENT_HTTP_CODES = {429, 502, 503, 504}
 _TERMINATE_SIGNAL = signal.SIGTERM
 _KILL_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)
@@ -78,6 +86,10 @@ class JsonRpcError(DiscoveryError):
     """Raised for malformed or unsuccessful JSON-RPC messages."""
 
 
+class UnsupportedFeatureError(DiscoveryError):
+    """Raised when negotiated capabilities do not permit an operation."""
+
+
 def load_tools_file(
     path: str | Path,
     *,
@@ -102,6 +114,8 @@ def discover_from_stdio_command(
     max_tools: int = 1000,
     max_pages: int = 100,
     inherit_env: bool = False,
+    compat_stdio_noise: bool = False,
+    protocol_version: str = MCP_PROTOCOL_VERSION,
 ) -> SourceResult:
     _validate_server_name(server_name)
     if not isinstance(command_text, str) or not command_text.strip():
@@ -116,13 +130,20 @@ def discover_from_stdio_command(
         command,
         timeout=timeout,
         inherit_env=inherit_env,
+        compat_stdio_noise=compat_stdio_noise,
+        protocol_version=protocol_version,
     ) as client:
         raw_tools = client.list_tools(max_tools=max_tools, max_pages=max_pages)
+        protocol_metadata = client.discovery_metadata()
     return _source_from_raw_tools(
         server_name=server_name,
         source_type="stdio",
         raw_tools=raw_tools,
-        metadata={"command": redact_command(command)},
+        metadata={
+            "command": redact_command(command),
+            "compat_stdio_noise": compat_stdio_noise,
+            **protocol_metadata,
+        },
     )
 
 
@@ -137,6 +158,12 @@ def discover_from_server_url(
     allow_private_network: bool = False,
     allow_insecure_http: bool = False,
     allow_loopback: bool = True,
+    protocol_version: str = MCP_PROTOCOL_VERSION,
+    credential_provider: CredentialProvider | None = None,
+    ca_bundle: str | None = None,
+    proxy_url: str | None = None,
+    client_cert: str | None = None,
+    client_key: str | None = None,
 ) -> SourceResult:
     _validate_server_name(server_name)
     with StreamableHttpMcpClient(
@@ -146,13 +173,20 @@ def discover_from_server_url(
         allow_private_network=allow_private_network,
         allow_insecure_http=allow_insecure_http,
         allow_loopback=allow_loopback,
+        protocol_version=protocol_version,
+        credential_provider=credential_provider,
+        ca_bundle=ca_bundle,
+        proxy_url=proxy_url,
+        client_cert=client_cert,
+        client_key=client_key,
     ) as client:
         raw_tools = client.list_tools(max_tools=max_tools, max_pages=max_pages)
+        protocol_metadata = client.discovery_metadata()
     return _source_from_raw_tools(
         server_name=server_name,
         source_type="streamable-http",
         raw_tools=raw_tools,
-        metadata={"url": redact_url(url)},
+        metadata={"url": redact_url(url), **protocol_metadata},
     )
 
 
@@ -169,6 +203,13 @@ def discover_from_config(
     allow_insecure_http: bool = False,
     allow_command_execution: bool = False,
     inherit_env: bool = False,
+    compat_stdio_noise: bool = False,
+    protocol_version: str = MCP_PROTOCOL_VERSION,
+    credential_provider: CredentialProvider | None = None,
+    ca_bundle: str | None = None,
+    proxy_url: str | None = None,
+    client_cert: str | None = None,
+    client_key: str | None = None,
 ) -> list[SourceResult]:
     _validate_timeout(timeout)
     _validate_positive_int("max_tools", max_tools, MAX_LINT_TOOLS)
@@ -177,6 +218,7 @@ def discover_from_config(
     _validate_positive_int(
         "max_response_bytes", max_response_bytes, MAX_RESPONSE_BYTES_LIMIT
     )
+    _validate_protocol_version(protocol_version)
     if server_filter is not None:
         _validate_server_name(server_filter)
 
@@ -209,6 +251,13 @@ def discover_from_config(
                 allow_insecure_http,
                 allow_command_execution,
                 inherit_env,
+                compat_stdio_noise,
+                protocol_version,
+                credential_provider,
+                ca_bundle,
+                proxy_url,
+                client_cert,
+                client_key,
             ): name
             for name, cfg in sorted(servers.items())
         }
@@ -237,12 +286,19 @@ class StdioMcpClient:
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         inherit_env: bool = False,
+        compat_stdio_noise: bool = False,
+        protocol_version: str = MCP_PROTOCOL_VERSION,
     ) -> None:
         self.command = _validate_command(command)
         self.timeout = _validate_timeout(timeout)
         self.cwd = _validate_cwd(cwd)
         self.env = _validate_env(env or {})
         self.inherit_env = bool(inherit_env)
+        self.compat_stdio_noise = bool(compat_stdio_noise)
+        self.requested_protocol_version = _validate_protocol_version(protocol_version)
+        self.negotiated_protocol_version: str | None = None
+        self.server_capabilities: dict[str, Any] | None = None
+        self.server_info: dict[str, Any] | None = None
         self._proc: subprocess.Popen[bytes] | None = None
         self._request_id = 0
         self._request_lock = threading.Lock()
@@ -310,7 +366,7 @@ class StdioMcpClient:
         result = self.request(
             "initialize",
             {
-                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "protocolVersion": self.requested_protocol_version,
                 "capabilities": {},
                 "clientInfo": {
                     "name": "mcp-tool-card-linter",
@@ -318,7 +374,11 @@ class StdioMcpClient:
                 },
             },
         )
-        _validate_initialize_result(result)
+        (
+            self.negotiated_protocol_version,
+            self.server_capabilities,
+            self.server_info,
+        ) = _validate_initialize_result(result)
         self.notify("notifications/initialized", {})
 
     def list_tools(
@@ -329,6 +389,7 @@ class StdioMcpClient:
     ) -> list[Any]:
         _validate_positive_int("max_tools", max_tools, MAX_LINT_TOOLS)
         _validate_positive_int("max_pages", max_pages, MAX_PAGES_LIMIT)
+        _require_tools_capability(self.server_capabilities)
         tools: list[Any] = []
         cursor: str | None = None
         seen_cursors: set[str] = set()
@@ -473,11 +534,22 @@ class StdioMcpClient:
                     raise JsonRpcError(
                         f"stdio server returned malformed JSON: {safe_log_text(exc)}"
                     ) from exc
+                if not self.compat_stdio_noise:
+                    raise JsonRpcError(
+                        "stdio server wrote non-JSON data to stdout; use compatibility mode only for a reviewed legacy server"
+                    ) from exc
                 skipped += 1
                 if skipped > MAX_SKIPPED_STDIO_MESSAGES:
                     raise JsonRpcError("Too many invalid messages on stdio stdout")
                 continue
-            if not isinstance(message, dict) or message.get("id") != request_id:
+            if not isinstance(message, dict):
+                if not self.compat_stdio_noise:
+                    raise JsonRpcError("stdio MCP message must be a JSON object")
+                skipped += 1
+                if skipped > MAX_SKIPPED_STDIO_MESSAGES:
+                    raise JsonRpcError("Too many unrelated messages on stdio stdout")
+                continue
+            if message.get("id") != request_id:
                 skipped += 1
                 if skipped > MAX_SKIPPED_STDIO_MESSAGES:
                     raise JsonRpcError("Too many unrelated messages on stdio stdout")
@@ -552,6 +624,14 @@ class StdioMcpClient:
         with self._stderr_lines.mutex:
             return list(self._stderr_lines.queue)
 
+    def discovery_metadata(self) -> dict[str, Any]:
+        return {
+            "protocol_requested": self.requested_protocol_version,
+            "protocol_negotiated": self.negotiated_protocol_version,
+            "capabilities": self.server_capabilities or {},
+            "server_info": self.server_info or {},
+        }
+
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(
@@ -566,6 +646,41 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def _build_http_opener(
+    *,
+    ca_bundle: str | None,
+    proxy_url: str | None,
+    client_cert: str | None,
+    client_key: str | None,
+) -> urllib.request.OpenerDirector:
+    if client_key is not None and client_cert is None:
+        raise DiscoveryError("--client-key requires --client-cert")
+    try:
+        context = ssl.create_default_context(cafile=_regular_file(ca_bundle, "CA bundle"))
+        if client_cert is not None:
+            certfile = _regular_file(client_cert, "client certificate")
+            assert certfile is not None
+            context.load_cert_chain(
+                certfile=certfile,
+                keyfile=_regular_file(client_key, "client key") if client_key else None,
+            )
+    except (OSError, ssl.SSLError, ValueError) as exc:
+        raise DiscoveryError(f"Invalid TLS configuration: {safe_log_text(exc)}") from exc
+    handlers: list[Any] = [
+        _NoRedirectHandler(),
+        urllib.request.HTTPSHandler(context=context),
+    ]
+    # Do not silently inherit HTTP(S)_PROXY from the scanner environment. Proxy
+    # routing is an explicit trust decision and can otherwise change the peer
+    # that receives endpoint paths and authorization headers.
+    proxies: dict[str, str] = {}
+    if proxy_url is not None:
+        proxy = _validate_proxy_url(proxy_url)
+        proxies = {"http": proxy, "https": proxy}
+    handlers.append(urllib.request.ProxyHandler(proxies))
+    return urllib.request.build_opener(*handlers)
+
+
 class StreamableHttpMcpClient:
     def __init__(
         self,
@@ -577,6 +692,12 @@ class StreamableHttpMcpClient:
         allow_insecure_http: bool = False,
         allow_loopback: bool = True,
         retries: int = 2,
+        protocol_version: str = MCP_PROTOCOL_VERSION,
+        credential_provider: CredentialProvider | None = None,
+        ca_bundle: str | None = None,
+        proxy_url: str | None = None,
+        client_cert: str | None = None,
+        client_key: str | None = None,
     ) -> None:
         self.allow_private_network = bool(allow_private_network)
         self.allow_insecure_http = bool(allow_insecure_http)
@@ -595,10 +716,20 @@ class StreamableHttpMcpClient:
             "max_response_bytes", max_response_bytes, MAX_RESPONSE_BYTES_LIMIT
         )
         self.retries = _validate_nonnegative_int("retries", retries, MAX_HTTP_RETRIES)
+        self.requested_protocol_version = _validate_protocol_version(protocol_version)
+        self.negotiated_protocol_version: str | None = None
+        self.server_capabilities: dict[str, Any] | None = None
+        self.server_info: dict[str, Any] | None = None
+        self.credential_provider = credential_provider
         self._request_id = 0
         self._session_id: str | None = None
         self._request_lock = threading.Lock()
-        self._opener = urllib.request.build_opener(_NoRedirectHandler())
+        self._opener = _build_http_opener(
+            ca_bundle=ca_bundle,
+            proxy_url=proxy_url,
+            client_cert=client_cert,
+            client_key=client_key,
+        )
 
     def __enter__(self) -> "StreamableHttpMcpClient":
         try:
@@ -615,7 +746,7 @@ class StreamableHttpMcpClient:
         result, headers = self._request(
             "initialize",
             {
-                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "protocolVersion": self.requested_protocol_version,
                 "capabilities": {},
                 "clientInfo": {
                     "name": "mcp-tool-card-linter",
@@ -625,7 +756,11 @@ class StreamableHttpMcpClient:
             capture_headers=True,
             retryable=False,
         )
-        _validate_initialize_result(result)
+        (
+            self.negotiated_protocol_version,
+            self.server_capabilities,
+            self.server_info,
+        ) = _validate_initialize_result(result)
         session_id = _header_value(headers, "mcp-session-id")
         if session_id:
             if len(session_id) > 1024 or any(ord(char) < 32 for char in session_id):
@@ -641,6 +776,7 @@ class StreamableHttpMcpClient:
     ) -> list[Any]:
         _validate_positive_int("max_tools", max_tools, MAX_LINT_TOOLS)
         _validate_positive_int("max_pages", max_pages, MAX_PAGES_LIMIT)
+        _require_tools_capability(self.server_capabilities)
         tools: list[Any] = []
         cursor: str | None = None
         seen_cursors: set[str] = set()
@@ -761,11 +897,12 @@ class StreamableHttpMcpClient:
                 return message, headers
             except urllib.error.HTTPError as exc:
                 last_error = exc
+                retry_after = _retry_after_seconds(exc.headers.get("Retry-After"))
                 error_body = _read_http_error(exc)
                 if (
                     exc.code in _TRANSIENT_HTTP_CODES
                     and attempt + 1 < attempts
-                    and self._retry_delay(attempt, deadline)
+                    and self._retry_delay(attempt, deadline, retry_after=retry_after)
                 ):
                     continue
                 if 300 <= exc.code < 400:
@@ -803,8 +940,14 @@ class StreamableHttpMcpClient:
             raise DiscoveryError(str(exc)) from exc
         return self._opener.open(request, timeout=max(0.001, timeout))
 
-    def _retry_delay(self, attempt: int, deadline: float) -> bool:
-        delay = min(0.1 * (2**attempt), 1.0)
+    def _retry_delay(
+        self,
+        attempt: int,
+        deadline: float,
+        *,
+        retry_after: float | None = None,
+    ) -> bool:
+        delay = retry_after if retry_after is not None else min(0.1 * (2**attempt), 1.0)
         remaining = deadline - time.monotonic()
         if remaining <= delay:
             return False
@@ -815,13 +958,30 @@ class StreamableHttpMcpClient:
         headers = {
             "Accept": "application/json, text/event-stream",
             "Content-Type": "application/json",
-            "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
+            "MCP-Protocol-Version": (
+                self.negotiated_protocol_version or self.requested_protocol_version
+            ),
             "User-Agent": f"mcp-tool-card-linter/{__version__}",
         }
+        if self.credential_provider is not None:
+            headers.update(
+                _validate_credential_headers(
+                    self.credential_provider.authorization_headers(self.url, ())
+                )
+            )
         effective_session = session_id if session_id is not None else self._session_id
         if effective_session:
             headers["Mcp-Session-Id"] = effective_session
         return headers
+
+    def discovery_metadata(self) -> dict[str, Any]:
+        return {
+            "protocol_requested": self.requested_protocol_version,
+            "protocol_negotiated": self.negotiated_protocol_version,
+            "capabilities": self.server_capabilities or {},
+            "server_info": self.server_info or {},
+            "authenticated": self.credential_provider is not None,
+        }
 
 
 def extract_tools(payload: Any) -> list[Any]:
@@ -854,6 +1014,13 @@ def _discover_config_server(
     allow_insecure_http: bool,
     allow_command_execution: bool,
     inherit_env: bool,
+    compat_stdio_noise: bool,
+    protocol_version: str,
+    credential_provider: CredentialProvider | None,
+    ca_bundle: str | None,
+    proxy_url: str | None,
+    client_cert: str | None,
+    client_key: str | None,
 ) -> SourceResult:
     if not isinstance(cfg, dict):
         raise DiscoveryError(f"Config for server '{safe_log_text(name)}' must be an object")
@@ -904,6 +1071,12 @@ def _discover_config_server(
             allow_private_network=allow_private_network,
             allow_insecure_http=allow_insecure_http,
             allow_loopback=allow_private_network,
+            protocol_version=protocol_version,
+            credential_provider=credential_provider,
+            ca_bundle=ca_bundle,
+            proxy_url=proxy_url,
+            client_cert=client_cert,
+            client_key=client_key,
         )
 
     if not allow_command_execution:
@@ -939,13 +1112,21 @@ def _discover_config_server(
         cwd=cwd,
         env=env,
         inherit_env=inherit_env,
+        compat_stdio_noise=compat_stdio_noise,
+        protocol_version=protocol_version,
     ) as client:
         raw_tools = client.list_tools(max_tools=max_tools, max_pages=max_pages)
+        protocol_metadata = client.discovery_metadata()
     return _source_from_raw_tools(
         server_name=name,
         source_type="stdio",
         raw_tools=raw_tools,
-        metadata={"command": redact_command(command), "cwd": cwd},
+        metadata={
+            "command": redact_command(command),
+            "cwd": cwd,
+            "compat_stdio_noise": compat_stdio_noise,
+            **protocol_metadata,
+        },
     )
 
 
@@ -1072,11 +1253,13 @@ def _jsonrpc_result(message: dict[str, Any], request_id: int) -> Any:
     return message["result"]
 
 
-def _validate_initialize_result(result: Any) -> None:
+def _validate_initialize_result(
+    result: Any,
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
     if not isinstance(result, dict):
         raise JsonRpcError("initialize returned a non-object result")
     protocol_version = result.get("protocolVersion")
-    if protocol_version != MCP_PROTOCOL_VERSION:
+    if protocol_version not in SUPPORTED_MCP_PROTOCOL_VERSIONS:
         raise JsonRpcError(
             f"Server selected unsupported MCP protocol version: {safe_log_text(protocol_version)}"
         )
@@ -1090,6 +1273,16 @@ def _validate_initialize_result(result: Any) -> None:
         raise JsonRpcError("initialize result.serverInfo.name must be a non-empty string")
     if not isinstance(server_info.get("version"), str) or not server_info["version"]:
         raise JsonRpcError("initialize result.serverInfo.version must be a non-empty string")
+    return protocol_version, capabilities, server_info
+
+
+def _require_tools_capability(capabilities: dict[str, Any] | None) -> None:
+    # None means the low-level client has not been initialized yet. This preserves
+    # direct request mocking for embedders while enforcing the negotiated state.
+    if capabilities is not None and not isinstance(capabilities.get("tools"), dict):
+        raise UnsupportedFeatureError(
+            "unsupported_feature: server did not declare the tools capability"
+        )
 
 
 def _validate_tools_page(result: Any) -> tuple[list[Any], str | None]:
@@ -1118,6 +1311,8 @@ def _read_limited(response: Any, limit: int) -> bytes:
         if declared < 0 or declared > limit:
             raise DiscoveryError(f"HTTP response exceeds the {limit} byte limit")
     raw = response.read(limit + 1)
+    if not isinstance(raw, bytes):
+        raise DiscoveryError("HTTP response reader returned non-bytes data")
     if len(raw) > limit:
         raise DiscoveryError(f"HTTP response exceeds the {limit} byte limit")
     return raw
@@ -1132,6 +1327,22 @@ def _read_http_error(exc: urllib.error.HTTPError) -> str:
         exc.close()
     suffix = "..." if len(raw) > MAX_HTTP_ERROR_BYTES else ""
     return safe_log_text(raw[:MAX_HTTP_ERROR_BYTES].decode("utf-8", errors="replace")) + suffix
+
+
+def _retry_after_seconds(value: str | None) -> float | None:
+    if value is None:
+        return None
+    value = value.strip()
+    if re.fullmatch(r"[0-9]{1,9}", value):
+        return min(float(value), MAX_RETRY_AFTER_SECONDS)
+    try:
+        parsed = parsedate_to_datetime(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        delay = max(0.0, (parsed - datetime.now(UTC)).total_seconds())
+        return min(delay, MAX_RETRY_AFTER_SECONDS)
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def _header_value(headers: dict[str, str], name: str) -> str:
@@ -1205,6 +1416,69 @@ def _validate_server_name(name: Any) -> str:
             f"Server name must contain at most {MAX_SERVER_NAME_CHARS} characters and no controls"
         )
     return name
+
+
+def _validate_protocol_version(value: Any) -> str:
+    if not isinstance(value, str) or value not in SUPPORTED_MCP_PROTOCOL_VERSIONS:
+        raise DiscoveryError(
+            "protocol_version must be one of "
+            + ", ".join(SUPPORTED_MCP_PROTOCOL_VERSIONS)
+        )
+    return value
+
+
+def _validate_credential_headers(value: Any) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        raise DiscoveryError("Credential provider returned a non-mapping header set")
+    allowed = {"authorization", "dpop"}
+    result: dict[str, str] = {}
+    for key, header_value in value.items():
+        if not isinstance(key, str) or key.lower() not in allowed:
+            raise DiscoveryError("Credential provider returned an unsupported header")
+        if (
+            not isinstance(header_value, str)
+            or not header_value
+            or len(header_value) > 128 * 1024
+            or any(ord(char) < 32 or ord(char) == 127 for char in header_value)
+        ):
+            raise DiscoveryError("Credential provider returned an invalid header value")
+        canonical = "Authorization" if key.lower() == "authorization" else "DPoP"
+        result[canonical] = header_value
+    return result
+
+
+def _validate_proxy_url(value: Any) -> str:
+    if not isinstance(value, str) or not value or len(value) > 4096:
+        raise DiscoveryError("Proxy URL must be a bounded string")
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise DiscoveryError("Proxy URL contains control characters")
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise DiscoveryError(f"Invalid proxy URL: {safe_log_text(exc)}") from exc
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise DiscoveryError("Proxy URL must use http or https and include a hostname")
+    if parsed.username is not None or parsed.password is not None:
+        raise DiscoveryError("Credentials in proxy URLs are not allowed")
+    if parsed.query or parsed.fragment:
+        raise DiscoveryError("Proxy URL must not include a query or fragment")
+    if port is not None and not 1 <= port <= 65535:
+        raise DiscoveryError("Proxy URL port must be in 1..65535")
+    return value
+
+
+def _regular_file(value: str | None, label: str) -> str | None:
+    if value is None:
+        return None
+    try:
+        resolved = Path(value).expanduser().resolve()
+        mode = resolved.stat().st_mode
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise DiscoveryError(f"Invalid {label}: {safe_log_text(exc)}") from exc
+    if not stat.S_ISREG(mode):
+        raise DiscoveryError(f"{label} is not a regular file: {safe_log_text(resolved)}")
+    return str(resolved)
 
 
 def _validate_timeout(value: float) -> float:

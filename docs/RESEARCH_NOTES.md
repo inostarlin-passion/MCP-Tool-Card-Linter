@@ -1,6 +1,6 @@
 # 研究依据与可核验推理
 
-检索与复核日期：2026-07-10。
+检索与复核日期：2026-07-13。
 
 ## 检索方法
 
@@ -12,6 +12,7 @@
 4. 以 JSON Schema 官方 2020-12 资料和 RFC 8259 核验 schema keyword、`additionalProperties`、重复 JSON key、解析器尺寸/深度限制。
 5. 以 Python 官方 `subprocess`、`tempfile` 文档核验进程会话、显式环境映射和安全临时文件行为。
 6. 对照 2025/2026 MCP 安全与工具描述论文，以及公开 scanner 的 rug-pull/command-execution实践，区分“规范事实”“工程推断”和“仍不确定事项”。
+7. 针对 v0.3 生产化增量继续做多跳核验：MCP lifecycle→version/capability negotiation→tools capability；transport→stdio purity/SSE→Retry-After RFC；authorization→RFC 9728/8414/8707/PKCE；报告→SARIF 2.1.0→GitHub ingestion limits；发布→PyPI Trusted Publishing→OIDC/attestation；SBOM→CycloneDX Python 工具。
 
 优先级为：正式规范/RFC/标准库官方文档 > OWASP/CWE > 论文原文 > 开源实现说明。论文为预印本或经验研究时，不把其结论表述为协议保证。
 
@@ -50,6 +51,30 @@
 11. 公开 scanner 已采用 hash 监测 rug pull/cross-origin escalation；Snyk Agent Scan 明确警告扫描 config 会执行其中 command，并建议对第三方 config 使用容器、VM 或 disposable environment。这证明“扫描器自身执行不可信配置”是实际工程风险，而不是纯理论场景。
     来源：[Snyk Agent Scan](https://github.com/snyk/agent-scan)、[MCP Armor](https://github.com/aira-security/mcp-checkpoint)
 
+12. MCP 初始化不是固定版本回显检查：客户端发送其支持的最新版本，服务端可返回自己支持的另一版本；客户端只有支持该返回值才能继续。能力协商同样是操作前提，server 只有声明 `tools` capability 才应接受 `tools/list`。HTTP 后续请求必须发送协商后的 `MCP-Protocol-Version`。
+    来源：[MCP Lifecycle](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle)、[MCP Tools](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)
+
+13. MCP 2025-11-25 的 `Icon` 包含必需 `src` 以及可选 `mimeType`、`sizes`、`theme`；icon URL 可能引入跟踪、凭据泄露、超大图片和可执行 SVG 风险。客户端应限制大小、验证内容，并优先同源且不携带认证获取。本项目只验证结构且不下载，因此不会新增 icon fetch SSRF 面。
+    来源：[MCP Schema Reference](https://modelcontextprotocol.io/specification/2025-11-25/schema)、[MCP Base Protocol icon security guidance](https://modelcontextprotocol.io/specification/2025-11-25/basic)
+
+14. 2025-11-25 将 JSON Schema 2020-12 设为 MCP schema 默认 dialect。`jsonschema` 的 `Draft202012Validator.check_schema` 用元模式验证 schema 本身，因此适合把“规范合法性”和本项目启发式质量/安全规则分开。
+    来源：[MCP 2025-11-25 Changelog](https://modelcontextprotocol.io/specification/2025-11-25/changelog)、[JSON Schema Draft 2020-12](https://json-schema.org/draft/2020-12)、[python-jsonschema validators](https://python-jsonschema.readthedocs.io/en/stable/validate/)
+
+15. MCP HTTP authorization 要求发现 Protected Resource Metadata 和 Authorization Server Metadata，并对 Authorization Code 流验证 PKCE；Resource Indicators 用于把 token 绑定到目标资源，token passthrough 被明确禁止。因此“能发送预签发 Bearer token”不能表述为“完成 OAuth 2.1 支持”。
+    来源：[MCP Authorization](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization)、[MCP Security Best Practices](https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices)
+
+16. GitHub 接受第三方 SARIF 2.1.0 并使用 rule、result、location、partial fingerprint 等字段；上传还有 10 MiB 压缩大小、每 run 25,000 results 等限制。机器接口因此需要显式 schema version、稳定 rule ID 和有界输出，而不应依赖 Markdown 文本。
+    来源：[GitHub SARIF Support](https://docs.github.com/en/code-security/reference/code-scanning/sarif-files/sarif-support)、[Uploading SARIF](https://docs.github.com/en/code-security/how-tos/find-and-fix-vulnerabilities/analyze-code-with-code-scanning/integrating-with-code-scanning/uploading-a-sarif-file-to-github)
+
+17. PyPI Trusted Publishing 通过 GitHub OIDC claim 换取最长约 15 分钟的短期 token，避免长期 PyPI secret；但它不证明构建内容未被替换，仍需 attestation。GitHub artifact attestation把制品与 repository、commit、workflow 绑定，且明确指出 attestation 不是“制品安全”的证明。
+    来源：[PyPI Trusted Publishing](https://docs.pypi.org/trusted-publishers/)、[PyPI Trusted Publisher Security Model](https://docs.pypi.org/trusted-publishers/security-model/)、[GitHub Artifact Attestations](https://docs.github.com/en/actions/concepts/security/artifact-attestations)
+
+18. GitHub 安全使用指南说明完整 commit SHA 是引用 Action 的不可变方式；CycloneDX 官方 Python 生成器支持从 Python environment 产生标准 SBOM。这支持在 release workflow 中同时采用 Action SHA pin、wheel/sdist、SHA-256、CycloneDX SBOM 与 provenance。
+    来源：[GitHub Actions secure use](https://docs.github.com/en/actions/reference/security/secure-use)、[CycloneDX Python](https://github.com/CycloneDX/cyclonedx-python)
+
+19. HTTP `Retry-After` 可以是 delay-seconds 或 HTTP-date；503 可用它说明预计不可用时长，429 也可携带。客户端仍需用总 deadline 和最大等待上限约束服务端建议，避免把韧性机制变成任意阻塞。
+    来源：[RFC 9110 §10.2.3](https://www.rfc-editor.org/rfc/rfc9110.html#name-retry-after)、[RFC 6585 §4](https://www.rfc-editor.org/rfc/rfc6585.html#section-4)
+
 ## 从事实到实现的推理链
 
 | 事实/威胁 | 第一性原理 | 本项目措施 |
@@ -63,6 +88,11 @@
 | config command 等价于本地代码执行 | “读取配置”不应隐式扩大为“运行配置” | 默认拒绝；要求 `--allow-config-execution`；默认最小环境；`--inherit-env` 单独授权；报告 command 参数脱敏 |
 | URL validation 与 fetch 之间可能变化 | 仅解析 scheme 不能阻止 SSRF/redirect/rebinding | HTTPS 默认、private/reserved 检查、config loopback 授权、禁用 redirect、每次 request 前重验；文档明确 DNS TOCTOU 剩余风险 |
 | 部分写入会制造假报告 | 报告是 CI/审批输入，完整性优先于便利 | `mkstemp` + flush/fsync + `os.replace`；失败保留旧文件；POSIX 新文件 0600；Markdown/diagnostic 转义和 secret redaction |
+| 协议版本与能力会演进 | 互操作必须基于双方共同版本与显式能力，而不是本地常量猜测 | 支持 2025-11-25/2025-06-18 allowlist；记录 requested/negotiated/capabilities；后续 HTTP header 使用 negotiated；无 tools capability 则 `unsupported_feature` |
+| 规范 Schema 与启发式是不同事实层 | 元模式回答合法性，质量/安全规则回答工程风险 | `Draft202012Validator.check_schema` 完整校验；不同 schema 结果有界 LRU 缓存；其后继续执行本项目 bounded walker |
+| 组织需要稳定机器消费 | CI 不能依赖会变化的终端文案 | report schema 1.0.0、scan ID、JSON Pointer、rule metadata、deterministic JSON、SARIF/JUnit/JSONL/GitHub annotations |
+| 例外会成为永久绕过 | suppression 必须可归责并自动失效 | TOML policy 要求 reason/owner/expires；到期 finding 恢复且 expired record 进入报告 |
+| 认证材料容易从 argv/URL/报告泄漏 | token 的输入面应与普通配置分离 | 只从 env/0600 file 提供预签发 Bearer token；endpoint/proxy 禁止 userinfo；报告只记录 authenticated boolean；自定义 CA/proxy/mTLS 分离 |
 
 ## 推断
 
@@ -76,7 +106,7 @@
 
 1. 规则是可解释的启发式，可能有 false positive/false negative；尤其无法静态证明 server implementation 与 card 一致。
 2. 标准库 DNS 解析无法无竞态地 pin 到后续 socket；高保证部署仍需 egress proxy/network policy。项目已禁 redirect、重复校验和默认阻止 private/reserved 地址，但不宣称消除 DNS rebinding。
-3. Streamable HTTP 当前覆盖 initialize、notification、分页 tools/list、JSON/SSE、session DELETE；不实现 OAuth、GET SSE multiplex、experimental tasks 或全部 draft 行为。
+3. Streamable HTTP 当前覆盖 initialize、notification、分页 tools/list、有限 JSON/SSE response、session DELETE 和预签发 Bearer/mTLS；不实现 OAuth metadata/Authorization Code+PKCE、GET SSE multiplex/resumption、list_changed subscription、experimental tasks 或全部 draft 行为。
 4. POSIX 使用独立 session 尽力终止进程组；Windows 能关闭直接子进程和 pipe，但没有实现 Job Object，因此不能保证清理任意脱离/再派生的后代。
 5. SHA-256 baseline 未签名。若 baseline 和当前报告能被同一攻击者修改，change detection 失效。
 6. 本项目只扫描 tool card，不扫描 MCP prompts/resources、server source code、依赖漏洞、runtime tool output 或多步 toxic flow；应与 sandbox、SAST/SCA、runtime policy、audit 和人工复核组合。

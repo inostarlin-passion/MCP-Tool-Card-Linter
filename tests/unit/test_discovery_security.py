@@ -18,12 +18,27 @@ from mcp_tool_card_linter.discovery import (
     DiscoveryError,
     JsonRpcError,
     StdioMcpClient,
+    _build_http_opener,
     discover_from_config,
     load_tools_file,
 )
 
 
 class DiscoverySecurityTests(unittest.TestCase):
+    def test_http_opener_does_not_implicitly_load_environment_proxies(self) -> None:
+        with mock.patch(
+            "urllib.request.getproxies",
+            side_effect=AssertionError("implicit proxy lookup"),
+        ):
+            opener = _build_http_opener(
+                ca_bundle=None,
+                proxy_url=None,
+                client_cert=None,
+                client_key=None,
+            )
+
+        self.assertIsNotNone(opener)
+
     def test_config_local_command_requires_explicit_authorization(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = Path(tmpdir) / "mcp.json"

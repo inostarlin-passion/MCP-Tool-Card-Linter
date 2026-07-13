@@ -1,28 +1,40 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77,<84"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "mcp-tool-card-linter"
-version = "0.2.0"
+dynamic = ["version"]
 description = "CLI linter for MCP tool cards: schema quality, description clarity, side effects, and tool-poisoning risks."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "inostarlin-passion" }]
 keywords = ["mcp", "model-context-protocol", "linter", "ai-agents", "security"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Software Development :: Quality Assurance",
   "Topic :: Security",
 ]
-dependencies = []
+dependencies = [
+  "jsonschema>=4.23,<5",
+]
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2,<2",
+  "coverage[toml]>=7.6,<8",
+  "mypy>=1.14,<2",
+  "ruff>=0.9,<1",
+  "types-jsonschema>=4.23,<5",
+]
 
 [project.scripts]
 mcp-tool-card-linter = "mcp_tool_card_linter.cli:main"
@@ -30,3 +42,36 @@ mcp-toolsmith = "mcp_tool_card_linter.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = { attr = "mcp_tool_card_linter.__version__" }
+
+[tool.setuptools.package-data]
+mcp_tool_card_linter = ["schemas/*.json", "py.typed"]
+
+[tool.coverage.run]
+branch = true
+source = ["mcp_tool_card_linter"]
+parallel = true
+patch = ["subprocess"]
+
+[tool.coverage.report]
+fail_under = 75
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+packages = ["mcp_tool_card_linter"]

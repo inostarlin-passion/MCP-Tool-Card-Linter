@@ -7,7 +7,10 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from . import __version__
+from .auth import BearerTokenProvider, CredentialProvider
 from .discovery import (
+    SUPPORTED_MCP_PROTOCOL_VERSIONS,
     DiscoveryError,
     discover_from_config,
     discover_from_server_url,
@@ -16,17 +19,26 @@ from .discovery import (
 )
 from .lint import lint_sources
 from .models import LintConfig, SourceResult
+from .policy import PROFILES, PolicyConfig, load_policy
 from .reporting import (
     ReportError,
     baseline_fingerprints_from_payload,
     exit_code_for_report,
     optimize_from_report,
     report_to_json,
+    report_to_jsonl,
+    report_to_junit,
     report_to_markdown,
+    report_to_sarif,
+    report_to_github_annotations,
+    write_jsonl_report,
     write_json_report,
+    write_junit_report,
     write_markdown_report,
     write_optimization_report,
+    write_sarif_report,
 )
+from .rules import KNOWN_RULE_IDS, list_rule_metadata, rule_metadata
 from .security import (
     MAX_HTTP_RESPONSE_BYTES,
     InputValidationError,
@@ -43,6 +55,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_lint(args)
         if args.command == "optimize":
             return _run_optimize(args)
+        if args.command == "list-rules":
+            return _run_list_rules(args)
+        if args.command == "explain":
+            return _run_explain(args)
         parser.print_help(sys.stderr)
         return 2
     except (DiscoveryError, ReportError, InputValidationError) as exc:
@@ -54,6 +70,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 130
+    except Exception as exc:
+        if getattr(args, "debug", False):
+            raise
+        print(
+            f"internal error: {safe_log_text(exc)} (rerun with --debug for a traceback)",
+            file=sys.stderr,
+        )
+        return 2
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -61,6 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="mcp-tool-card-linter",
         description="Lint MCP tool metadata for schema quality, description clarity, side effects, and tool-poisoning risks.",
     )
+    parser.add_argument("--version", action="version", version=__version__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     lint_parser = subparsers.add_parser("lint", help="Discover and lint MCP tools")
@@ -72,6 +97,9 @@ def build_parser() -> argparse.ArgumentParser:
     lint_parser.add_argument("--server", help="Server name for config filtering or report labeling")
     lint_parser.add_argument("--json-report", help="Write machine-readable JSON report")
     lint_parser.add_argument("--markdown-report", help="Write human-readable Markdown report")
+    lint_parser.add_argument("--sarif-report", help="Write SARIF 2.1.0 for GitHub code scanning")
+    lint_parser.add_argument("--junit-report", help="Write JUnit XML for CI test reporting")
+    lint_parser.add_argument("--jsonl-report", help="Write streaming JSON Lines records")
     lint_parser.add_argument(
         "--baseline-report",
         help="Compare tool-card SHA-256 fingerprints with a previous JSON report",
@@ -79,8 +107,14 @@ def build_parser() -> argparse.ArgumentParser:
     lint_parser.add_argument(
         "--fail-on",
         choices=["critical", "error", "warning", "info", "never"],
-        default="error",
+        default=None,
         help="Exit with code 1 when findings at this severity or higher are present; source failures return code 2.",
+    )
+    lint_parser.add_argument(
+        "--protocol-version",
+        choices=SUPPORTED_MCP_PROTOCOL_VERSIONS,
+        default=SUPPORTED_MCP_PROTOCOL_VERSIONS[0],
+        help="Newest MCP protocol version to request; a supported previous version may be negotiated.",
     )
     lint_parser.add_argument("--timeout", type=_timeout_seconds, default=10.0, help="Total MCP request timeout in seconds (0.05..300)")
     lint_parser.add_argument("--max-tools", type=lambda value: _bounded_int(value, 100_000), default=1000, help="Maximum tools to lint per source")
@@ -102,6 +136,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Pass the full parent environment to stdio servers (may expose secrets)",
     )
     lint_parser.add_argument(
+        "--compat-stdio-noise",
+        action="store_true",
+        help="Skip bounded non-JSON stdout from a reviewed legacy stdio server (strict by default)",
+    )
+    lint_parser.add_argument(
         "--allow-private-network",
         action="store_true",
         help="Allow private/reserved destinations and config-sourced loopback URLs",
@@ -111,9 +150,44 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow plain HTTP for non-loopback destinations",
     )
+    credentials = lint_parser.add_mutually_exclusive_group()
+    credentials.add_argument(
+        "--bearer-token-env",
+        help="Read a pre-issued bearer token from this environment variable",
+    )
+    credentials.add_argument(
+        "--bearer-token-file",
+        help="Read a pre-issued bearer token from a private file (never accepts token text on CLI)",
+    )
+    lint_parser.add_argument("--ca-bundle", help="PEM CA bundle for enterprise/private PKI")
+    lint_parser.add_argument("--proxy", help="Explicit HTTP(S) proxy URL without embedded credentials")
+    lint_parser.add_argument("--client-cert", help="PEM client certificate chain for mTLS")
+    lint_parser.add_argument("--client-key", help="PEM private key for mTLS")
+    lint_parser.add_argument("--policy", help="Bounded TOML rule policy or pyproject.toml")
+    lint_parser.add_argument("--profile", choices=sorted(PROFILES), help="Override policy profile")
+    lint_parser.add_argument(
+        "--select",
+        action="append",
+        default=[],
+        metavar="RULE[,RULE...]",
+        help="Select exact rule IDs or trailing-* prefixes",
+    )
+    lint_parser.add_argument(
+        "--ignore",
+        action="append",
+        default=[],
+        metavar="RULE[,RULE...]",
+        help="Ignore exact rule IDs or trailing-* prefixes",
+    )
+    lint_parser.add_argument(
+        "--deterministic",
+        action="store_true",
+        help="Use a content-derived scan ID and fixed timestamp for reproducible output",
+    )
+    lint_parser.add_argument("--debug", action="store_true", help="Show unexpected tracebacks")
     lint_parser.add_argument(
         "--format",
-        choices=["markdown", "json", "none"],
+        choices=["markdown", "json", "sarif", "junit", "jsonl", "github", "none"],
         default="markdown",
         help="Stdout format. Use none when only report files are desired.",
     )
@@ -124,11 +198,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     optimize_parser.add_argument("--input-report", required=True, help="JSON report generated by lint")
     optimize_parser.add_argument("--output", help="Write optimization JSON to this path")
+    optimize_parser.add_argument("--debug", action="store_true", help="Show unexpected tracebacks")
+
+    rules_parser = subparsers.add_parser("list-rules", help="List stable rule metadata")
+    rules_parser.add_argument("--format", choices=["text", "json"], default="text")
+    rules_parser.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
+
+    explain_parser = subparsers.add_parser("explain", help="Explain a stable rule ID")
+    explain_parser.add_argument("rule_id", choices=KNOWN_RULE_IDS)
+    explain_parser.add_argument("--format", choices=["text", "json"], default="text")
+    explain_parser.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
 def _run_lint(args: argparse.Namespace) -> int:
     _validate_lint_paths(args)
+    policy = load_policy(args.policy) if args.policy else PolicyConfig()
+    policy = policy.with_cli_overrides(
+        profile=args.profile,
+        select=args.select,
+        ignore=args.ignore,
+    )
     baseline_fingerprints = None
     if args.baseline_report:
         baseline_payload = load_json_file(args.baseline_report)
@@ -145,16 +235,33 @@ def _run_lint(args: argparse.Namespace) -> int:
         sources,
         config,
         baseline_fingerprints=baseline_fingerprints,
+        policy=policy,
+        deterministic=args.deterministic,
     )
     if args.json_report:
         write_json_report(report, args.json_report)
     if args.markdown_report:
         write_markdown_report(report, args.markdown_report)
+    if args.sarif_report:
+        write_sarif_report(report, args.sarif_report)
+    if args.junit_report:
+        write_junit_report(report, args.junit_report)
+    if args.jsonl_report:
+        write_jsonl_report(report, args.jsonl_report)
     if args.format == "markdown":
         print(report_to_markdown(report), end="")
     elif args.format == "json":
         print(report_to_json(report))
-    exit_code = exit_code_for_report(report, args.fail_on)
+    elif args.format == "sarif":
+        print(report_to_sarif(report))
+    elif args.format == "junit":
+        print(report_to_junit(report), end="")
+    elif args.format == "jsonl":
+        print(report_to_jsonl(report), end="")
+    elif args.format == "github":
+        print(report_to_github_annotations(report), end="")
+    fail_on = args.fail_on or policy.fail_on or "error"
+    exit_code = exit_code_for_report(report, fail_on)
     if exit_code == 2:
         for source in report.sources:
             for error in source.get("errors", []):
@@ -167,6 +274,7 @@ def _run_lint(args: argparse.Namespace) -> int:
 
 
 def _discover_sources(args: argparse.Namespace) -> list[SourceResult]:
+    credential_provider = _credential_provider(args)
     if args.tools_file:
         server_name = args.server or "static"
         return [load_tools_file(args.tools_file, server_name=server_name)]
@@ -183,6 +291,13 @@ def _discover_sources(args: argparse.Namespace) -> list[SourceResult]:
             allow_insecure_http=args.allow_insecure_http,
             allow_command_execution=args.allow_config_execution,
             inherit_env=args.inherit_env,
+            compat_stdio_noise=args.compat_stdio_noise,
+            protocol_version=args.protocol_version,
+            credential_provider=credential_provider,
+            ca_bundle=args.ca_bundle,
+            proxy_url=args.proxy,
+            client_cert=args.client_cert,
+            client_key=args.client_key,
         )
     if args.stdio:
         return [
@@ -193,6 +308,8 @@ def _discover_sources(args: argparse.Namespace) -> list[SourceResult]:
                 max_tools=args.max_tools,
                 max_pages=args.max_pages,
                 inherit_env=args.inherit_env,
+                compat_stdio_noise=args.compat_stdio_noise,
+                protocol_version=args.protocol_version,
             )
         ]
     if args.server_url:
@@ -206,6 +323,12 @@ def _discover_sources(args: argparse.Namespace) -> list[SourceResult]:
                 max_response_bytes=args.max_response_bytes,
                 allow_private_network=args.allow_private_network,
                 allow_insecure_http=args.allow_insecure_http,
+                protocol_version=args.protocol_version,
+                credential_provider=credential_provider,
+                ca_bundle=args.ca_bundle,
+                proxy_url=args.proxy,
+                client_cert=args.client_cert,
+                client_key=args.client_key,
             )
         ]
     raise DiscoveryError("No source selected")
@@ -233,6 +356,36 @@ def _run_optimize(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_list_rules(args: argparse.Namespace) -> int:
+    rules = list_rule_metadata()
+    if args.format == "json":
+        print(json.dumps(rules, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        for rule in rules:
+            print(f"{rule['id']}\t{rule['category']}\t{rule['title']}")
+    return 0
+
+
+def _run_explain(args: argparse.Namespace) -> int:
+    rule = rule_metadata(args.rule_id).to_dict()
+    if args.format == "json":
+        print(json.dumps(rule, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(f"{rule['id']}: {rule['title']}")
+        print(f"Category: {rule['category']}")
+        print(f"Confidence: {rule['confidence']}")
+        print(f"References: {', '.join(rule['references'])}")
+    return 0
+
+
+def _credential_provider(args: argparse.Namespace) -> CredentialProvider | None:
+    if args.bearer_token_env:
+        return BearerTokenProvider.from_environment(args.bearer_token_env)
+    if args.bearer_token_file:
+        return BearerTokenProvider.from_file(args.bearer_token_file)
+    return None
+
+
 def _bounded_int(value: str, maximum: int) -> int:
     try:
         number = int(value)
@@ -256,14 +409,29 @@ def _timeout_seconds(value: str) -> float:
 def _validate_lint_paths(args: argparse.Namespace) -> None:
     outputs = [
         _resolved_path(value)
-        for value in (args.json_report, args.markdown_report)
+        for value in (
+            args.json_report,
+            args.markdown_report,
+            args.sarif_report,
+            args.junit_report,
+            args.jsonl_report,
+        )
         if value
     ]
     if len(outputs) != len(set(outputs)):
         raise ReportError("JSON and Markdown reports must use different paths")
     inputs = [
         _resolved_path(value)
-        for value in (args.tools_file, args.config, args.baseline_report)
+        for value in (
+            args.tools_file,
+            args.config,
+            args.baseline_report,
+            args.policy,
+            args.bearer_token_file,
+            args.ca_bundle,
+            args.client_cert,
+            args.client_key,
+        )
         if value
     ]
     overlap = set(outputs) & set(inputs)

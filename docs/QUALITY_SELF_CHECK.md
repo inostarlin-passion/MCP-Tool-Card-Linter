@@ -1,54 +1,55 @@
 # 质量自检表
 
-自检日期：2026-07-10。版本：0.2.0。
-
-判定口径：“通过”表示当前仓库定义的可执行验收条件已满足，不表示不存在剩余风险。事实依据是代码、自动测试和本次实际命令输出；推理依据见 `docs/RESEARCH_NOTES.md`。
+自检日期：2026-07-13。版本：0.3.0。结论：“通过”表示本仓库定义的本地可执行验收条件已满足，不表示静态扫描器能够证明 MCP server 的运行时安全。规范事实、工程推理和剩余不确定性分别记录在 [RESEARCH_NOTES.md](RESEARCH_NOTES.md)。
 
 ## 九方面验收结果
 
-| 质量方面 | 可执行验收标准 | 实现证据 | 测试证据 | 结论 |
+| 质量方面 | 可执行验收标准 | 实现证据 | 测试/度量证据 | 结论 |
 | --- | --- | --- | --- | --- |
-| 输入校验 | 所有 CLI、JSON、config、URL、command/env、report/baseline、JSON-RPC 和 schema 外部输入在使用前校验类型、语法与语义；拒绝 NaN/Infinity、重复 JSON key、NUL、非法协议版本和矛盾 report shape | `security.py` 的 strict JSON/URL/path/redaction；`discovery.py` 的 command/env/config/initialize/JSON-RPC 校验；`models.py` 的 `LintConfig` 限制；`reporting.py` 的 report/baseline 校验 | duplicate key、超长整数、非法 UTF-8、NaN、invalid env/timeout、unsupported protocol、malformed optimize、CLI `nan` 等 | 通过 |
-| 边界检查 | 攻击者控制的长度、数量、递归、循环、并发、重试和缓存均有硬上限；循环游标必须终止 | 10 MiB 文件；4 MiB HTTP/stdio 默认；8 条 stdout queue；100 行 stderr；tool/page/server/worker/schema/depth/description/card/retry/URL/arg/env 上限；重复 cursor 集合检测 | oversized HTTP/stdio、cursor repeat、schema node limit、CLI 最大值、2,000 cards budget | 通过 |
-| 异常处理 | 预期外部错误转成稳定错误/退出码，无 traceback 泄漏；一个 server 失败不吞掉其他结果；source error 即使 `--fail-on never` 仍返回 2 | `DiscoveryError`/`JsonRpcError`/`ReportError`/`InputValidationError`；config future 独立收集；diagnostic 控制字符与 secret 脱敏 | invalid JSON controlled error、partial config failure、HTTP transient/redirect/content-type/version、exit-code 测试 | 通过 |
-| 资源生命周期管理 | 初始化中途失败也清理；进程、pipe、reader thread、HTTP response/error/session、temp file 全路径关闭；报告替换失败保留旧文件 | stdio `__enter__` rollback、context manager、POSIX process session/terminate/kill、stdout/stderr thread join、HTTP context/HTTPError close/session DELETE、atomic temp cleanup | `PYTHONWARNINGS=error::ResourceWarning` 全套通过；failed-enter cleanup；atomic replace failure | 通过；Windows 后代进程仍有限制 |
-| 并发控制 | config worker 数有上限；同一 JSON-RPC client 的 request ID/write/read round trip 不交错；队列有界 | config `ThreadPoolExecutor` 为 1..32 且不超过 server 数；stdio/HTTP request lock；stdout queue 为 8；stderr queue 为 100 | 8 线程并发 request 的最大 active round trip 为 1；concurrency=33 拒绝；多 server 系统测试 | 通过 |
-| 性能 | 常见规模近线性；最坏输入被上限截断；2,000 cards 在宽松预算 10 s/128 MiB 内 | 单次 bounded traversal；metadata 总扫描字符/节点限制；SHA-256 canonical card；无第三方 runtime dependency | 自动 budget test；本机 build+lint 2,000 cards 实测 0.9226 s、tracemalloc peak 5.26 MiB | 通过（单机基准，不等同容量承诺） |
-| 韧性 | 可容忍有限非协议 stdout noise；HTTP tools/list 暂态失败有限重试；分页、单 server 和 cleanup 失败不扩散；任何 retry 有 deadline | 有界 noise skip、总 request deadline、tools/list 仅对 429/502/503/504 最多 2 次重试、source isolation、best-effort DELETE | 3 行 noise 后成功、503 后第二次成功、repeated cursor fail-closed、safe server 在另一 source 失败时仍进入报告 | 通过 |
-| 可测试性 | 规则、transport、report、security primitive 有可直接调用边界；mock server 不依赖公网或认证；测试可重复 | `lint_sources` 纯入口；`security.py` 独立；stdio/HTTP adversarial fixtures；CLI subprocess helper | 59 tests：unit 35、integration 20、system 4；均使用标准库 `unittest` | 通过 |
-| 可维护性 | 稳定 rule code、结构化数据模型、集中 limits/redaction、明确 CLI contract、研究/测试/剩余风险同步；无隐式第三方 runtime | `models.py`/`security.py`/`discovery.py`/`lint.py`/`reporting.py`/`cli.py` 分层；0.2.0 README 和三份质量文档；rule code 可检索 | compileall、diff check、全回归；baseline JSON 保持机器可读 | 通过；`lint.py`/`discovery.py` 后续可继续按 rule family/transport 拆分 |
+| 输入校验 | 所有 CLI、JSON、TOML policy、config、URL、credential、command/env、report/baseline、JSON-RPC 与 schema 输入在使用前校验类型、语法和语义 | strict JSON 拒绝重复 key、NaN/Infinity、非法 UTF-8；TOML 限 1 MiB 且 rule/suppression 全量校验；Bearer 只读 env/私有文件；endpoint/proxy 禁止凭据；Draft 2020-12 元模式完整校验 | duplicate key、5,000 位整数、非法 UTF-8、header injection、0600、未知 rule、无效 suppression、非法 schema/protocol/capability 均有负向用例 | 通过 |
+| 边界检查 | 攻击者控制的长度、数量、深度、队列、线程、分页、重试、缓存、finding 和等待时间都有硬上限 | 10 MiB 文件、4 MiB HTTP/stdio、8 条 stdout queue、100 行 stderr、tool/page/server/worker/schema/depth/card/retry/credential/policy/suppression 上限；每 tool 1,000 findings 并显式截断；SARIF 25,000 results；JSON Schema LRU 最多 1,024 项 | oversized HTTP/stdio、重复 cursor、schema node/depth、finding truncation、SARIF truncation、concurrency=33、2,000 cards budget | 通过 |
+| 异常处理 | 预期外部错误映射为稳定诊断和退出码；未知异常默认不泄露 traceback；单个 source 失败不吞掉其他 source | `DiscoveryError`、`JsonRpcError`、`ReportError`、`InputValidationError`、`PolicyError`、`CredentialError`；顶层 bounded/redacted internal error；source error 在 `--fail-on never` 下仍返回 2 | invalid JSON、无 capability、HTTP 错误、partial config failure、atomic replace failure、CLI exit-code 回归 | 通过 |
+| 资源生命周期管理 | 初始化中途失败也清理；进程、pipe、线程、HTTP response/error/session 与临时文件在所有路径关闭 | stdio context rollback、POSIX process group terminate/kill、reader thread join、HTTP context/HTTPError close、session DELETE、atomic temp cleanup | 全套测试在 `ResourceWarning` 提升为 error 后 80/80 通过；failed-enter 与 replace failure 专门覆盖 | 通过；Windows 任意脱离后代仍是已知限制 |
+| 并发控制 | 并发数有上限；共享 JSON-RPC round trip 不交错；背压队列有界；失败隔离 | config `ThreadPoolExecutor` 为 1..32 且不超过 server 数；stdio/HTTP request lock；stdout/stderr 有界 queue；每个 future 独立收集 | 8 线程并发 request 的最大 active round trip 为 1；过大 concurrency 拒绝；双 server 一坏一好仍保留安全结果 | 通过 |
+| 性能 | 常见规模近线性；重复 schema 校验可复用；最坏输入在分配/遍历前截断 | 单次 bounded metadata/schema traversal；canonical SHA-256；`Draft202012Validator.check_schema` 结果有界 LRU 缓存 | 2,000 cards 自动门限 `<10 s`/`<128 MiB`；本机 lint 实测 1.4029 s、peak 5.98 MiB | 通过（回归量级，不是跨机器 SLA） |
+| 韧性 | 兼容行为必须显式开启；暂态错误有限重试且受总 deadline 约束；服务端等待建议不能无限阻塞 | stdio 默认协议严格，legacy noise 需显式 flag；tools/list 仅对 429/502/503/504 重试；`Retry-After` 支持秒数/HTTP-date 且最多等待 30 s；分页 cursor 去重 | 503→成功、重复 cursor fail-closed、strict/compat stdio、unsupported version/capability、partial source failure | 通过 |
+| 可测试性 | 规则、policy、transport、credential、report、security primitive 均有可直接调用边界；协议测试不依赖公网 | `lint_sources` 纯入口；可注入 `CredentialProvider`；本地 adversarial HTTP/stdio fixtures；deterministic output | 80 tests：unit 50、integration 26、system 4；总分支覆盖率 76%，CI 强制门槛 75% | 通过 |
+| 可维护性 | 单一版本源、稳定规则目录/报告契约、类型/静态检查、变更和安全流程、可复现发布步骤齐备 | 0.3.0 单一 `__version__`；rule catalog 1.0.0；report schema 1.0.0；`py.typed`；policy/auth/rules 分层；README、threat model、compatibility、changelog、contributing、security | Ruff、strict mypy、compileall、diff check、wheel/sdist clean-install 全通过；CI 配置 3 OS × Python 3.11..3.14 | 通过；跨平台矩阵须由远端 CI 实际执行 |
 
-## 安全检查能力自检
+## 协议、安全与供应链能力
 
-| 能力 | 代表性 rule/机制 | 状态 |
+| 能力 | 实现 | 状态/边界 |
 | --- | --- | --- |
-| 全 metadata tool poisoning | `TOOL_POISONING_*` 扫描 value 与 key，不限于顶层 description | 已覆盖 |
-| 隐藏/混淆内容 | `HIDDEN_UNICODE_CONTROL`、`OBFUSCATED_METADATA`、`HARDCODED_SECRET_IN_METADATA` | 已覆盖（启发式） |
-| tool shadowing | `DUPLICATE_TOOL_NAME`、`CROSS_SERVER_TOOL_SHADOWING` | 已覆盖 |
-| rug pull | canonical SHA-256、`--baseline-report`、changed/new/missing | 已覆盖 change detection；未签名 |
-| dangerous parameters | command/URL/path/secret、string/array bounds、additional properties | 已覆盖静态 schema 信号 |
-| schema correctness | type/root/composition/ref/required/enum/bounds/annotation/subschema/dialect | 已覆盖核心 2020-12/MCP tool card 子集 |
-| ReDoS/oversized inputs | nested quantifier heuristic、permissive pattern、ineffective/max missing bounds | 已覆盖启发式 |
-| behavior/annotation conflicts | read-only/destructive/open-world/taskSupport/type validation | 已覆盖 |
-| scanner self-protection | config execution consent、minimal env、SSRF policy、no redirect、bounded I/O、atomic private reports | 已覆盖当前 transport |
+| MCP 版本与能力 | 协商 2025-11-25/2025-06-18；记录 requested/negotiated/capabilities；HTTP 后续 header 使用 negotiated；tools capability gate | 已实现；兼容范围见 [PROTOCOL_COMPATIBILITY.md](PROTOCOL_COMPATIBILITY.md) |
+| stdio 纯净性 | stdout 默认只接受 JSON-RPC；兼容 noise 必须显式开启且有界 | 已实现 |
+| Streamable HTTP | JSON/SSE response、session、DELETE、禁 redirect、SSRF policy、Retry-After | 已实现核心 discovery；未实现 GET SSE multiplex/resumption |
+| 认证/TLS | 预签发 Bearer env/0600 file、custom CA、proxy、mTLS，token 不进 argv/URL/report | 已实现 credential provider；不宣称完整 OAuth Authorization Code/PKCE |
+| Schema/图标 | JSON Schema Draft 2020-12 完整元模式 + bounded quality/security rules；MCP icon 结构校验且不下载 | 已实现 |
+| tool poisoning/integrity | 全 model-visible metadata、hidden Unicode、secret、shadowing、完整 card SHA-256 baseline | 已实现启发式检测；baseline 本身未签名 |
+| 稳定报告 | Draft 2020-12 report schema、scan ID、JSON Pointer、rule metadata、deterministic JSON、SARIF/JUnit/JSONL/GitHub | 已实现；SARIF 达 25,000 results 时显式记录截断，消费端仍应施加自身 size 限制 |
+| 组织 policy | profile、select/ignore、severity override、带 reason/owner/expires 的 suppression；到期恢复 finding 并审计 | 已实现 |
+| CI/发布 | SHA 固定 Actions、3 OS/4 Python、coverage/type/static/build gate；Trusted Publishing、SHA-256、CycloneDX SBOM、provenance attestation | 配置和本地命令已验证；真正发布仍依赖仓库/PyPI environment 配置 |
 
-## 质量门禁命令
+## 本地质量门禁
 
 ```bash
-PYTHONWARNINGS=error::ResourceWarning \
-PYTHONPATH=src \
-python3 -m unittest discover -s tests -v
-
-python3 -m compileall -q src tests
+PYTHONWARNINGS=error::ResourceWarning PYTHONPATH=src \
+  python -m coverage run -m unittest discover -s tests
+python -m coverage combine
+python -m coverage report --fail-under=75
+ruff check src tests
+mypy src
+python -m compileall -q src tests
+python -m build
 git diff --check
 ```
 
-## 剩余风险与后续优先级
+## 未解决风险与后续优先级
 
-1. 高：静态 card 无法证明 runtime behavior；需 sandbox、least privilege、approval、runtime output validation/policy 和 audit。
-2. 中：DNS validation 与 socket 使用间存在 TOCTOU；server/CI 环境应加 egress proxy/network policy。
-3. 中：baseline 未签名且首次快照可能已恶意；应将 approved report 放入受保护分支或使用签名/attestation。
-4. 中：当前不扫描 prompts/resources/source/dependencies/runtime responses/toxic multi-step flows。
-5. 低至中：regex 与自然语言 injection 规则是启发式；需要基于真实 corpus 持续校准 false positive/negative。
-6. 低：Windows 未使用 Job Object，恶意 server 主动脱离后可能留下 descendant；建议 Windows CI/实现验证。
-7. 维护性：规则增长后应把 `lint.py` 拆成 metadata/schema/behavior rule family，把 `discovery.py` 拆成 stdio/http/config 模块；当前测试为后续重构提供保护网。
+1. 高：静态 card 不能证明 runtime behavior。执行不可信 config/server 应放入容器、VM 或 OS sandbox，并结合最小权限、approval、runtime input/output validation 和 audit。
+2. 高：尚未实现 OAuth Protected Resource/Authorization Server Metadata、Authorization Code + PKCE 与 Resource Indicators；当前只接受调用方预先获得的 Bearer token。
+3. 中：标准库 URL 校验与 socket 使用之间仍有 DNS TOCTOU；高保证部署需要 egress proxy/network policy。
+4. 中：baseline 未签名且首次快照可能已恶意；approved report 应进入受保护分支或绑定签名/attestation。
+5. 中：未实现 `notifications/tools/list_changed` 持续发现、GET SSE resumption、tasks，也不扫描 prompts/resources/source/dependencies/runtime responses/toxic multi-step flows。
+6. 低至中：自然语言 injection、ReDoS 和参数危险性规则是可解释启发式，仍需 corpus、fuzzing、mutation testing 和误报/漏报校准。
+7. 低：Windows 未使用 Job Object，恶意 server 主动脱离后可能留下 descendant；需在远端 Windows CI 加专门测试与实现。
