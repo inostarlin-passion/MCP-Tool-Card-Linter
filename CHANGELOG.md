@@ -5,6 +5,40 @@ it moves toward 1.0. Deprecations are documented here before removal where secur
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-14
+
+### Added
+
+- Pluggable stdio execution boundaries with default-deny CLI behavior, explicit host compatibility,
+  hardened Docker, Linux Bubblewrap, and Windows Job Object backends.
+- Cross-request DNS address pinning with IPv4/IPv6 policy revalidation and DNS rebinding tests.
+- RFC 8785 JSON canonicalization and Ed25519-signed baseline bundles bound to publisher, explicit
+  server identity, endpoint/source metadata, protocol, capabilities, server info, and executor.
+- Bounded per-field SHA-256 maps and added/removed/changed JSON Pointer diffs without raw-value
+  disclosure.
+- Owner-only, signed, hash-chained append-only approval logs with concurrency locking and full-chain
+  verification.
+- Unit, integration, and system coverage for execution boundaries, DNS rebinding, signature
+  tampering, identity/publisher drift, field diffs, approval chains, and signed-baseline CLI flows.
+
+### Changed
+
+- Version increased from 0.4.0 to 0.5.0 and report schema from 1.0.0 to 1.1.0.
+- CLI `--stdio` and config command execution now require an explicit `--executor`; config commands
+  continue to require the independent `--allow-config-execution` consent flag.
+- Unsigned legacy reports remain readable for migration but unchanged matches are marked
+  `baseline_untrusted`; production can require signatures with `--require-signed-baseline`.
+
+### Security
+
+- Docker defaults to no network, read-only root, dropped capabilities, no-new-privileges, bounded
+  tmpfs, and CPU/memory/process limits; Bubblewrap uses an unshared network/mount namespace and
+  read-only bindings.
+- Windows Job Objects kill the associated process tree when the job closes and enforce CPU, memory,
+  and active-process limits.
+- Baseline signatures and approval records use domain-separated Ed25519 messages over RFC 8785
+  canonical JSON; private keys and logs require owner-only permissions on POSIX.
+
 ### Fixed
 
 - Use buffered stdio pipes so bounded `readline` detects oversized JSON-RPC messages
@@ -70,6 +104,7 @@ it moves toward 1.0. Deprecations are documented here before removal where secur
 - Environment proxy variables are not inherited implicitly; proxy routing requires `--proxy`.
 - Per-tool findings and SARIF results have explicit truncation limits and machine-readable markers.
 
-[Unreleased]: https://github.com/inostarlin-passion/MCP-Tool-Card-Linter/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/inostarlin-passion/MCP-Tool-Card-Linter/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/inostarlin-passion/MCP-Tool-Card-Linter/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/inostarlin-passion/MCP-Tool-Card-Linter/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/inostarlin-passion/MCP-Tool-Card-Linter/compare/v0.2.0...v0.3.0

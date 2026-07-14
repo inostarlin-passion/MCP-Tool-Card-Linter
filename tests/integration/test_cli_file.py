@@ -89,7 +89,7 @@ class CliFileIntegrationTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             payload = json.loads(json_report.read_text(encoding="utf-8"))
-            self.assertEqual(payload["report_schema_version"], "1.0.0")
+            self.assertEqual(payload["report_schema_version"], "1.1.0")
             self.assertTrue(payload["scan_id"].startswith("urn:sha256:"))
             self.assertEqual(
                 json.loads(sarif_report.read_text(encoding="utf-8"))["version"],

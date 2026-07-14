@@ -8,9 +8,10 @@ In this project, a "Tool Card" is an engineering concept: a reviewable bundle of
 
 - Input sources: static tools JSON, `mcp.json`, stdio MCP servers, and Streamable HTTP MCP endpoints.
 - Checks: complete JSON Schema 2020-12 metaschema validation plus bounded security/quality rules, icon validation, full model-visible metadata scanning, tool poisoning, hidden Unicode, embedded credentials, cross-server tool shadowing, rug-pull fingerprints, dangerous parameters, side-effect labeling, and annotation conflicts.
-- Reports: report schema 1.0.0, deterministic JSON, Markdown, SARIF 2.1.0, JUnit XML, JSON Lines, GitHub annotations, stable rule metadata, SHA-256 card fingerprints, and approval/block suggestions.
+- Reports: report schema 1.1.0, deterministic JSON, Markdown, SARIF 2.1.0, JUnit XML, JSON Lines, GitHub annotations, stable rule metadata, RFC 8785 card fingerprints, field-level hash diffs, and approval/block suggestions.
 - Policy: production/security/spec/strict/compatibility profiles, select/ignore, severity overrides, and suppressions that require a reason, owner, and expiry date.
-- Defensive discovery: MCP 2025-11-25, 2025-06-18, and legacy 2025-03-26 negotiation, capability gating, strict stdio, bounded resumable Streamable HTTP/SSE, optional one-shot `tools/list_changed` refresh, bounded I/O/concurrency/retries, SSRF-aware URL policy, disabled redirects, minimal child environments, process cleanup, and atomic private report files.
+- Defensive discovery: MCP 2025-11-25, 2025-06-18, and legacy 2025-03-26 negotiation, capability gating, strict stdio, bounded resumable Streamable HTTP/SSE, DNS rebinding detection, optional one-shot `tools/list_changed` refresh, bounded I/O/concurrency/retries, SSRF-aware URL policy, disabled redirects, minimal child environments, managed sandbox processes, and atomic private report files.
+- Safe execution and trust: default-deny local commands; Docker, Bubblewrap, Windows Job Object, and explicit unsandboxed host backends; Ed25519-signed baselines bound to publisher/server/source identity; and signed hash-chained append-only approval logs.
 - Remote credentials: pre-issued Bearer tokens from environment/private files, custom CA bundles, explicit proxies, and mTLS; or MCP OAuth protected-resource/authorization-server discovery with Authorization Code, S256 PKCE, Resource Indicators, private single-use state, and private token output for a pre-registered public client.
 
 ## Quick Start
@@ -35,6 +36,7 @@ Example stdio MCP server:
 ```bash
 PYTHONPATH=src python3 -m mcp_tool_card_linter lint \
   --stdio "python3 tests/fixtures/mock_mcp_stdio_server.py" \
+  --executor host \
   --server mock \
   --fail-on never
 ```
@@ -45,6 +47,7 @@ Example `mcp.json`:
 PYTHONPATH=src python3 -m mcp_tool_card_linter lint \
   --config examples/mcp.json \
   --allow-config-execution \
+  --executor host \
   --server mock \
   --fail-on never
 ```
@@ -94,21 +97,21 @@ mcp-toolsmith lint --server-url https://example.com/mcp \
 
 `authorize start` requires S256 support, uses the challenge scope before metadata fallback, includes
 the canonical MCP `resource` in both requests, and refuses non-HTTPS authorization endpoints by
-default. Dynamic Client Registration and refresh-token management are intentionally outside v0.4;
+default. Dynamic Client Registration and refresh-token management are intentionally outside v0.5;
 register the public client and exact redirect URI with the authorization server first.
 
 ## Secure Discovery Defaults
 
-- `--config` never executes local `command` entries unless `--allow-config-execution` is present. Review the exact command first and prefer a sandbox for third-party configs.
+- Local command execution defaults to `--executor none`. Config commands additionally require `--allow-config-execution`. Use `--executor docker --executor-image IMAGE`, Linux `--executor bubblewrap`, or Windows `--executor windows-job`; `--executor host` is an explicit compatibility choice without filesystem or network isolation.
 - stdio servers receive a small allowlist of ordinary environment variables by default. `--inherit-env` is an explicit opt-in because a full parent environment often contains credentials.
 - stdio stdout is protocol-strict by default. `--compat-stdio-noise` is an explicit compatibility exception for reviewed legacy servers.
-- remote endpoints require HTTPS except for an explicitly supplied loopback `--server-url`. Private/reserved destinations and loopback URLs loaded indirectly from config require `--allow-private-network`; non-loopback plain HTTP additionally requires `--allow-insecure-http`.
+- remote endpoints require HTTPS except for an explicitly supplied loopback `--server-url`. Private/reserved destinations and loopback URLs loaded indirectly from config require `--allow-private-network`; non-loopback plain HTTP additionally requires `--allow-insecure-http`. Resolved IPv4/IPv6 sets are pinned and changes across requests/retries are refused.
 - HTTP redirects are refused. Response bodies, stdio messages, stderr history, pagination, retries, server count, worker count, schemas, descriptions, and tool counts all have hard limits.
 - reports are written through a same-directory temporary file and atomic replacement. New report files default to owner-only permissions on POSIX.
 - programmatic stdio discovery accepts an argument sequence, which avoids shell quoting ambiguity. The `--stdio` string uses POSIX shell tokenization on Unix and the native Windows command-line parser on Windows.
 - OAuth state and token files use mode `0600` on POSIX. Windows uses the containing directory's inherited DACL, so keep those files in a directory restricted to the current user and administrators.
 
-These controls reduce accidental exposure; they are not a sandbox. A reviewed stdio command still runs with the linter process's operating-system identity and can access resources permitted to that identity.
+Docker uses no network, a read-only root, dropped capabilities, no-new-privileges, a bounded tmpfs, and CPU/memory/process limits. Bubblewrap uses an empty mount namespace, read-only runtime/workspace bindings, no network namespace, and `prlimit` where available. Windows Job Object applies process-tree lifetime, CPU, memory, and process-count limits, but does not provide filesystem or network isolation. Treat `host` as trusted-code-only.
 
 ## Policy and rule catalog
 
@@ -138,7 +141,7 @@ See [`examples/policy.toml`](examples/policy.toml) for a standalone policy.
 
 ## Machine report contracts
 
-JSON reports declare `report_schema_version: 1.0.0`, a `scan_id`, tool version, policy, and requested/negotiated protocol metadata. The bundled Draft 2020-12 schema is at `src/mcp_tool_card_linter/schemas/report.schema.json`.
+JSON reports declare `report_schema_version: 1.1.0`, a `scan_id`, tool version, policy, requested/negotiated protocol metadata, per-field hashes, and bounded field diffs. The bundled Draft 2020-12 schema is at `src/mcp_tool_card_linter/schemas/report.schema.json`.
 
 ```bash
 mcp-toolsmith lint --tools-file tools.json --deterministic \
@@ -201,6 +204,7 @@ The default threshold is `--fail-on error`. `--fail-on never` disables finding-b
 
 ```bash
 mcp-toolsmith lint --config ./mcp.json --allow-config-execution \
+  --executor docker --executor-image registry.example/reviewed-mcp-server@sha256:DIGEST \
   --json-report mcp-tool-report.json --fail-on error --format none
 ```
 
@@ -220,21 +224,40 @@ Each output `decision` is one of:
 - `require_approval`
 - `block_until_review`
 
-## Rug-pull Baselines
+## Signed Rug-pull Baselines
 
-Every JSON report contains a deterministic `sha256:` fingerprint of each complete tool definition. Compare a fresh discovery with an approved report:
+Every JSON report contains an RFC 8785 + SHA-256 fingerprint of each complete tool definition and SHA-256 fingerprints for bounded JSON Pointer leaves. Create an Ed25519 trust root, approve a report, and append an independently reviewable hash-chain record:
+
+```bash
+mcp-toolsmith baseline keygen \
+  --private-key baseline.key --public-key baseline.pub
+mcp-toolsmith baseline approve \
+  --report approved-report.json --output approved-baseline.json \
+  --private-key baseline.key --publisher example-org \
+  --server-identity example-org/production-mcp@1 \
+  --approved-by security-reviewer --approval-log approvals.jsonl
+mcp-toolsmith baseline verify \
+  --baseline approved-baseline.json --public-key baseline.pub \
+  --approval-log approvals.jsonl
+```
+
+Compare fresh discovery with that signed baseline:
 
 ```bash
 mcp-toolsmith lint \
   --tools-file current-tools.json \
   --server production \
-  --baseline-report approved-report.json \
+  --baseline-report approved-baseline.json \
+  --baseline-public-key baseline.pub \
+  --require-signed-baseline \
+  --expected-publisher example-org \
+  --expected-server-identity example-org/production-mcp@1 \
   --json-report current-report.json \
   --fail-on error \
   --format none
 ```
 
-Changed cards emit `TOOL_CARD_CHANGED`, are marked `baseline_status: changed`, and are recommended for blocking until review. New and missing cards are summarized separately. Fingerprints provide change detection, not publisher authenticity; protect the approved baseline with repository controls or signing.
+Changed cards emit `TOOL_CARD_CHANGED`, report added/removed/changed JSON Pointer paths without disclosing raw values, and are blocked pending review. Identity, endpoint/capability/server-info, or publisher drift has distinct `identity_changed`/`publisher_changed` states. Unsigned legacy reports remain readable for migration, but an otherwise unchanged match is marked `baseline_untrusted`; use `--require-signed-baseline` in production.
 
 ## Notable Security Rules
 
@@ -251,6 +274,10 @@ Changed cards emit `TOOL_CARD_CHANGED`, are marked `baseline_status: changed`, a
 - [JSON Schema Draft 2020-12](https://json-schema.org/draft/2020-12)
 - [GitHub SARIF support](https://docs.github.com/en/code-security/reference/code-scanning/sarif-files/sarif-support)
 - [MCP security best practices](https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices)
+- [RFC 8785 JSON Canonicalization Scheme](https://www.rfc-editor.org/rfc/rfc8785)
+- [RFC 8032 Ed25519](https://www.rfc-editor.org/rfc/rfc8032)
+- [Docker run security/resource flags](https://docs.docker.com/reference/cli/docker/container/run/)
+- [Windows Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)
 - [OWASP MCP Security Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/MCP_Security_Cheat_Sheet.html)
 - [OpenAI MCP and connectors guide](https://developers.openai.com/api/docs/guides/tools-connectors-mcp)
 - [MCP tool description smells paper](https://arxiv.org/abs/2602.14878)

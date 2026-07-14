@@ -24,7 +24,9 @@ classifiers = [
   "Topic :: Security",
 ]
 dependencies = [
+  "cryptography>=45,<50",
   "jsonschema>=4.23,<5",
+  "rfc8785>=0.1.4,<1",
 ]
 
 [project.optional-dependencies]

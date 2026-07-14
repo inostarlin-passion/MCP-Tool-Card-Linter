@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://raw.githubusercontent.com/inostarlin-passion/MCP-Tool-Card-Linter/v0.4.0/src/mcp_tool_card_linter/schemas/report.schema.json",
+  "$id": "https://raw.githubusercontent.com/inostarlin-passion/MCP-Tool-Card-Linter/v0.5.0/src/mcp_tool_card_linter/schemas/report.schema.json",
   "title": "MCP Tool Card Linter Report",
   "type": "object",
   "additionalProperties": false,
@@ -23,7 +23,7 @@
   ],
   "properties": {
     "$schema": {"type": "string", "format": "uri", "maxLength": 2048},
-    "report_schema_version": {"const": "1.0.0"},
+    "report_schema_version": {"const": "1.1.0"},
     "rule_catalog_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
     "scan_id": {"type": "string", "pattern": "^urn:(uuid:[0-9a-f-]{36}|sha256:[0-9a-f]{64})$"},
     "generated_at": {"type": "string", "format": "date-time"},
@@ -68,7 +68,7 @@
     "tool": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["server_name", "tool_name", "score", "risk_level", "risk_categories", "estimated_card_chars", "card_fingerprint", "baseline_status", "issues", "recommendations"],
+      "required": ["server_name", "tool_name", "score", "risk_level", "risk_categories", "estimated_card_chars", "card_fingerprint", "baseline_status", "field_fingerprints", "baseline_diff", "issues", "recommendations"],
       "properties": {
         "server_name": {"type": "string", "minLength": 1, "maxLength": 512},
         "tool_name": {"type": "string", "minLength": 1, "maxLength": 512},
@@ -77,10 +77,32 @@
         "risk_categories": {"$ref": "#/$defs/stringArray"},
         "estimated_card_chars": {"type": "integer", "minimum": 0},
         "card_fingerprint": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-        "baseline_status": {"enum": ["not_checked", "new", "unchanged", "changed"]},
+        "baseline_status": {"enum": ["not_checked", "new", "unchanged", "changed", "identity_changed", "publisher_changed", "baseline_untrusted"]},
+        "field_fingerprints": {
+          "type": "object",
+          "maxProperties": 4097,
+          "propertyNames": {"type": "string", "pattern": "^/", "maxLength": 10000},
+          "additionalProperties": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+        },
+        "baseline_diff": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["added", "removed", "changed", "truncated"],
+          "properties": {
+            "added": {"$ref": "#/$defs/pointerArray"},
+            "removed": {"$ref": "#/$defs/pointerArray"},
+            "changed": {"$ref": "#/$defs/pointerArray"},
+            "truncated": {"type": "boolean"}
+          }
+        },
         "issues": {"type": "array", "maxItems": 1000, "items": {"$ref": "#/$defs/issue"}},
         "recommendations": {"$ref": "#/$defs/stringArray"}
       }
+    },
+    "pointerArray": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {"type": "string", "pattern": "^/", "maxLength": 10000}
     },
     "issue": {
       "type": "object",

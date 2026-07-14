@@ -8,7 +8,15 @@ from .rules import RULE_CATALOG_VERSION, json_pointer, rule_metadata
 from .security import safe_log_text
 
 Severity = Literal["info", "warning", "error", "critical"]
-BaselineStatus = Literal["not_checked", "new", "unchanged", "changed"]
+BaselineStatus = Literal[
+    "not_checked",
+    "new",
+    "unchanged",
+    "changed",
+    "identity_changed",
+    "publisher_changed",
+    "baseline_untrusted",
+]
 
 MAX_LINT_TOOLS = 100_000
 MAX_SCHEMA_DEPTH_LIMIT = 64
@@ -152,6 +160,26 @@ class LintConfig:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class BaselineEntry:
+    card_fingerprint: str
+    field_fingerprints: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class BaselineAssessment:
+    trust_status: Literal["not_checked", "signed", "untrusted"] = "not_checked"
+    binding_status: Literal[
+        "not_checked", "match", "identity_changed", "publisher_changed"
+    ] = "not_checked"
+    key_id: str | None = None
+    publisher: str | None = None
+    server_identity: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return cast(dict[str, Any], _sanitize_report_value(asdict(self)))
+
+
 @dataclass(slots=True)
 class ToolReport:
     server_name: str
@@ -162,6 +190,8 @@ class ToolReport:
     estimated_card_chars: int
     card_fingerprint: str
     baseline_status: BaselineStatus
+    field_fingerprints: dict[str, str]
+    baseline_diff: dict[str, Any]
     issues: list[Issue]
     recommendations: list[str]
 
@@ -181,9 +211,9 @@ class LintReport:
     scan_id: str = ""
     report_schema: str = (
         "https://raw.githubusercontent.com/inostarlin-passion/"
-        "MCP-Tool-Card-Linter/v0.4.0/src/mcp_tool_card_linter/schemas/report.schema.json"
+        "MCP-Tool-Card-Linter/v0.5.0/src/mcp_tool_card_linter/schemas/report.schema.json"
     )
-    report_schema_version: str = "1.0.0"
+    report_schema_version: str = "1.1.0"
     policy: dict[str, Any] = field(default_factory=dict)
     protocol: list[dict[str, Any]] = field(default_factory=list)
     facts: list[str] = field(default_factory=list)

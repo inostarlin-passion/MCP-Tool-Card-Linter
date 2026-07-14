@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/inostarlin-passion/MCP-Tool-Card-Linter/v0.5.0/src/mcp_tool_card_linter/schemas/baseline.schema.json",
+  "title": "MCP Tool Card Linter Signed Baseline",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "algorithm", "key_id", "payload", "signature"],
+  "properties": {
+    "$schema": {"type": "string", "format": "uri"},
+    "schema_version": {"const": "1.0.0"},
+    "algorithm": {"const": "Ed25519"},
+    "key_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "signature": {"type": "string", "pattern": "^[A-Za-z0-9_-]{86}$"},
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["approved_at", "approved_by", "binding", "report_digest", "report"],
+      "properties": {
+        "approved_at": {"type": "string", "format": "date-time", "maxLength": 128},
+        "approved_by": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "report_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "report": {"type": "object"},
+        "binding": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["publisher", "server_identity", "source_identity"],
+          "properties": {
+            "publisher": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "server_identity": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "source_identity": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+          }
+        }
+      }
+    }
+  }
+}

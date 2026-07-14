@@ -9,7 +9,7 @@ import uuid
 from collections import Counter, defaultdict
 from datetime import UTC, datetime
 from functools import lru_cache
-from typing import Any, Iterable, Iterator, Mapping, TypeGuard
+from typing import Any, Iterable, Iterator, Mapping, TypeGuard, cast
 from urllib.parse import urlsplit
 
 from jsonschema import Draft202012Validator
@@ -18,6 +18,8 @@ from jsonschema.exceptions import SchemaError
 from . import __version__
 from .models import (
     Issue,
+    BaselineAssessment,
+    BaselineEntry,
     BaselineStatus,
     LintConfig,
     LintReport,
@@ -29,6 +31,7 @@ from .models import (
 )
 from .policy import PolicyConfig
 from .security import safe_log_text
+from .trust import TrustError, canonical_json
 
 GENERIC_TOOL_NAMES = {
     "run",
@@ -233,7 +236,8 @@ def lint_sources(
     sources: Iterable[SourceResult],
     config: LintConfig,
     *,
-    baseline_fingerprints: Mapping[tuple[str, str], str] | None = None,
+    baseline_fingerprints: Mapping[tuple[str, str], str | BaselineEntry] | None = None,
+    baseline_assessment: BaselineAssessment | None = None,
     policy: PolicyConfig | None = None,
     deterministic: bool = False,
 ) -> LintReport:
@@ -272,6 +276,7 @@ def lint_sources(
                     cross_server_names,
                     config,
                     baseline_fingerprints,
+                    baseline_assessment,
                     policy_config,
                     suppressed_findings,
                     expired_suppressions,
@@ -293,6 +298,7 @@ def lint_sources(
         source_summaries,
         tool_reports,
         baseline_fingerprints=baseline_fingerprints,
+        baseline_assessment=baseline_assessment,
     )
     protocol = [
         {
@@ -332,7 +338,8 @@ def _lint_tool(
     duplicate_names: set[str],
     cross_server_names: set[str],
     config: LintConfig,
-    baseline_fingerprints: Mapping[tuple[str, str], str] | None,
+    baseline_fingerprints: Mapping[tuple[str, str], str | BaselineEntry] | None,
+    baseline_assessment: BaselineAssessment | None,
     policy: PolicyConfig,
     suppressed_findings: list[dict[str, str]],
     expired_suppressions: list[dict[str, str]],
@@ -347,10 +354,18 @@ def _lint_tool(
     risk_categories = _risk_categories(tool, text_blob)
 
     fingerprint = _card_fingerprint(canonical_card)
+    field_fingerprints = _field_fingerprints(tool.raw)
+    baseline_diff: dict[str, Any] = {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "truncated": False,
+    }
     baseline_status: BaselineStatus = "not_checked"
     if baseline_fingerprints is not None:
-        expected = baseline_fingerprints.get((report_server_name, report_tool_name))
-        if expected is None:
+        expected_entry = baseline_fingerprints.get((report_server_name, report_tool_name))
+        expected = ""
+        if expected_entry is None:
             baseline_status = "new"
             issues.append(
                 Issue(
@@ -361,9 +376,22 @@ def _lint_tool(
                     recommendation="Review and approve the new tool before updating the trusted baseline.",
                 )
             )
-        elif isinstance(expected, str) and hmac.compare_digest(expected, fingerprint):
-            baseline_status = "unchanged"
         else:
+            expected = (
+                expected_entry.card_fingerprint
+                if isinstance(expected_entry, BaselineEntry)
+                else expected_entry
+            )
+            expected_fields = (
+                expected_entry.field_fingerprints
+                if isinstance(expected_entry, BaselineEntry)
+                else {}
+            )
+            if expected_fields:
+                baseline_diff = _field_diff(expected_fields, field_fingerprints)
+        if expected_entry is not None and hmac.compare_digest(expected, fingerprint):
+            baseline_status = "unchanged"
+        elif expected_entry is not None:
             baseline_status = "changed"
             risk_categories.add("integrity")
             issues.append(
@@ -373,9 +401,53 @@ def _lint_tool(
                     path="$",
                     message="Tool metadata changed relative to the supplied baseline.",
                     recommendation="Treat this as a possible rug pull: review the diff and re-approve before updating the baseline.",
-                    evidence=f"expected={str(expected)[:80]} current={fingerprint}",
+                    evidence=(
+                        f"expected={str(expected)[:80]} current={fingerprint} "
+                        f"fields={_diff_evidence(baseline_diff)}"
+                    ),
                 )
             )
+    assessment = baseline_assessment or BaselineAssessment()
+    if baseline_fingerprints is not None and assessment.binding_status in {
+        "identity_changed",
+        "publisher_changed",
+    }:
+        baseline_status = cast(BaselineStatus, assessment.binding_status)
+        risk_categories.add("integrity")
+        code = (
+            "BASELINE_PUBLISHER_CHANGED"
+            if assessment.binding_status == "publisher_changed"
+            else "BASELINE_IDENTITY_CHANGED"
+        )
+        issues.append(
+            Issue(
+                code=code,
+                severity="critical",
+                path="$",
+                message=(
+                    "The signed baseline is bound to a different publisher."
+                    if assessment.binding_status == "publisher_changed"
+                    else "The signed baseline is bound to a different server identity or endpoint."
+                ),
+                recommendation="Refuse the baseline until an independent reviewer verifies and re-approves the new identity.",
+            )
+        )
+    elif (
+        baseline_fingerprints is not None
+        and assessment.trust_status == "untrusted"
+        and baseline_status == "unchanged"
+    ):
+        baseline_status = "baseline_untrusted"
+        risk_categories.add("integrity")
+        issues.append(
+            Issue(
+                code="BASELINE_SIGNATURE_MISSING",
+                severity="error",
+                path="$",
+                message="The unchanged fingerprint came from an unsigned legacy baseline.",
+                recommendation="Create and verify an Ed25519-signed baseline before treating this tool as approved.",
+            )
+        )
     if tool.name in cross_server_names:
         risk_categories.add("shadowing")
 
@@ -423,6 +495,8 @@ def _lint_tool(
         estimated_card_chars=estimated_card_chars,
         card_fingerprint=fingerprint,
         baseline_status=baseline_status,
+        field_fingerprints=field_fingerprints,
+        baseline_diff=baseline_diff,
         issues=issues,
         recommendations=recommendations,
     )
@@ -2085,20 +2159,88 @@ def _recommendations(
 
 def _canonical_card_text(tool: ToolCard) -> str:
     try:
-        return json.dumps(
-            tool.raw,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-            allow_nan=False,
-        )
-    except (TypeError, ValueError, RecursionError):
+        return canonical_json(tool.raw).decode("utf-8")
+    except (TrustError, UnicodeDecodeError):
         return repr(tool.raw)
 
 
 def _card_fingerprint(canonical: str) -> str:
     digest = hashlib.sha256(canonical.encode("utf-8", errors="replace")).hexdigest()
     return f"sha256:{digest}"
+
+
+MAX_FIELD_FINGERPRINTS = 4096
+MAX_FIELD_DIFF_PATHS = 256
+
+
+def _field_fingerprints(value: Any) -> dict[str, str]:
+    result: dict[str, str] = {}
+    truncated = False
+
+    def visit(item: Any, pointer: str) -> None:
+        nonlocal truncated
+        if len(result) >= MAX_FIELD_FINGERPRINTS:
+            truncated = True
+            return
+        if isinstance(item, dict) and item:
+            for key in sorted(item, key=str):
+                escaped = str(key).replace("~", "~0").replace("/", "~1")
+                visit(item[key], f"{pointer}/{escaped}")
+            return
+        if isinstance(item, list) and item:
+            for index, child in enumerate(item):
+                visit(child, f"{pointer}/{index}")
+            return
+        try:
+            raw = canonical_json(item)
+        except TrustError:
+            raw = repr(item).encode("utf-8", errors="replace")
+        result[pointer or "/"] = f"sha256:{hashlib.sha256(raw).hexdigest()}"
+
+    visit(value, "")
+    if truncated:
+        try:
+            raw = canonical_json(value)
+        except TrustError:
+            raw = repr(value).encode("utf-8", errors="replace")
+        result["/$truncated"] = f"sha256:{hashlib.sha256(raw).hexdigest()}"
+    return result
+
+
+def _field_diff(
+    expected: Mapping[str, str], current: Mapping[str, str]
+) -> dict[str, Any]:
+    expected_paths = set(expected)
+    current_paths = set(current)
+    added = sorted(current_paths - expected_paths)
+    removed = sorted(expected_paths - current_paths)
+    changed = sorted(
+        path
+        for path in expected_paths & current_paths
+        if not hmac.compare_digest(expected[path], current[path])
+    )
+    total = len(added) + len(removed) + len(changed)
+    remaining = MAX_FIELD_DIFF_PATHS
+    bounded_added = added[:remaining]
+    remaining -= len(bounded_added)
+    bounded_removed = removed[:remaining]
+    remaining -= len(bounded_removed)
+    bounded_changed = changed[:remaining]
+    return {
+        "added": bounded_added,
+        "removed": bounded_removed,
+        "changed": bounded_changed,
+        "truncated": total > MAX_FIELD_DIFF_PATHS,
+    }
+
+
+def _diff_evidence(diff: Mapping[str, Any]) -> str:
+    paths = [
+        *cast(list[str], diff.get("added", [])),
+        *cast(list[str], diff.get("removed", [])),
+        *cast(list[str], diff.get("changed", [])),
+    ]
+    return ",".join(paths[:8]) or "unavailable"
 
 
 def _scan_id(report: LintReport, *, deterministic: bool) -> str:
@@ -2125,7 +2267,8 @@ def _summarize(
     source_summaries: list[dict[str, Any]],
     tool_reports: list[ToolReport],
     *,
-    baseline_fingerprints: Mapping[tuple[str, str], str] | None,
+    baseline_fingerprints: Mapping[tuple[str, str], str | BaselineEntry] | None,
+    baseline_assessment: BaselineAssessment | None,
 ) -> dict[str, Any]:
     severity_counts: dict[str, int] = defaultdict(int)
     risk_counts: dict[str, int] = defaultdict(int)
@@ -2171,11 +2314,21 @@ def _summarize(
         "unchanged": sum(report.baseline_status == "unchanged" for report in tool_reports),
         "changed": sum(report.baseline_status == "changed" for report in tool_reports),
         "new": sum(report.baseline_status == "new" for report in tool_reports),
+        "identity_changed": sum(
+            report.baseline_status == "identity_changed" for report in tool_reports
+        ),
+        "publisher_changed": sum(
+            report.baseline_status == "publisher_changed" for report in tool_reports
+        ),
+        "untrusted": sum(
+            report.baseline_status == "baseline_untrusted" for report in tool_reports
+        ),
         "missing": (
             len(set(baseline_fingerprints) - current_identities)
             if baseline_fingerprints is not None
             else 0
         ),
+        "trust": (baseline_assessment or BaselineAssessment()).to_dict(),
     }
     return {
         "sources_scanned": len(source_summaries),

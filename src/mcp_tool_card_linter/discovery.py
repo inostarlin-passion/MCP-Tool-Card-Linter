@@ -26,17 +26,18 @@ from urllib.parse import urlsplit
 
 from . import __version__
 from .auth import CredentialProvider
+from .execution import ExecutionError, HostExecutor, ManagedProcess, ProcessExecutor
 from .models import MAX_LINT_TOOLS, SourceResult, ToolCard
 from .security import (
     MAX_HTTP_ERROR_BYTES,
     MAX_HTTP_RESPONSE_BYTES,
+    DnsPinningPolicy,
     InputValidationError,
     load_json_file,
     redact_command,
     redact_url,
     safe_log_text,
     strict_json_loads,
-    validate_mcp_url,
 )
 
 SUPPORTED_MCP_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
@@ -130,6 +131,7 @@ def discover_from_stdio_command(
     compat_stdio_noise: bool = False,
     protocol_version: str = MCP_PROTOCOL_VERSION,
     refresh_on_list_changed: float = 0.0,
+    executor: ProcessExecutor | None = None,
 ) -> SourceResult:
     _validate_server_name(server_name)
     _validate_optional_timeout("refresh_on_list_changed", refresh_on_list_changed)
@@ -140,6 +142,7 @@ def discover_from_stdio_command(
         inherit_env=inherit_env,
         compat_stdio_noise=compat_stdio_noise,
         protocol_version=protocol_version,
+        executor=executor,
     ) as client:
         raw_tools = client.list_tools(max_tools=max_tools, max_pages=max_pages)
         list_changed = False
@@ -157,6 +160,7 @@ def discover_from_stdio_command(
             "compat_stdio_noise": compat_stdio_noise,
             "list_changed_received": list_changed,
             "refresh_count": int(list_changed),
+            "executor": client.executor.name,
             **protocol_metadata,
         },
     )
@@ -238,6 +242,7 @@ def discover_from_config(
     client_cert: str | None = None,
     client_key: str | None = None,
     refresh_on_list_changed: float = 0.0,
+    command_executor: ProcessExecutor | None = None,
 ) -> list[SourceResult]:
     _validate_timeout(timeout)
     _validate_positive_int("max_tools", max_tools, MAX_LINT_TOOLS)
@@ -288,6 +293,7 @@ def discover_from_config(
                 client_cert,
                 client_key,
                 refresh_on_list_changed,
+                command_executor,
             ): name
             for name, cfg in sorted(servers.items())
         }
@@ -318,6 +324,7 @@ class StdioMcpClient:
         inherit_env: bool = False,
         compat_stdio_noise: bool = False,
         protocol_version: str = MCP_PROTOCOL_VERSION,
+        executor: ProcessExecutor | None = None,
     ) -> None:
         self.command = _validate_command(command)
         self.timeout = _validate_timeout(timeout)
@@ -326,10 +333,12 @@ class StdioMcpClient:
         self.inherit_env = bool(inherit_env)
         self.compat_stdio_noise = bool(compat_stdio_noise)
         self.requested_protocol_version = _validate_protocol_version(protocol_version)
+        self.executor = executor or HostExecutor()
         self.negotiated_protocol_version: str | None = None
         self.server_capabilities: dict[str, Any] | None = None
         self.server_info: dict[str, Any] | None = None
         self._proc: subprocess.Popen[bytes] | None = None
+        self._managed_process: ManagedProcess | None = None
         self._request_id = 0
         self._request_lock = threading.Lock()
         self._stdout_messages: queue.Queue[bytes | None] = queue.Queue(
@@ -366,21 +375,14 @@ class StdioMcpClient:
         )
         environment.update(self.env)
         try:
-            self._proc = subprocess.Popen(
+            managed = self.executor.spawn(
                 self.command,
                 cwd=self.cwd,
                 env=environment,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                # Raw FileIO reads may legally return short chunks.  A buffered
-                # pipe makes readline(size) consume up to the newline or the
-                # explicit size bound, so an oversized JSON-RPC line cannot be
-                # mistaken for a sequence of unrelated partial messages.
-                bufsize=-1,
-                start_new_session=os.name == "posix",
             )
-        except OSError as exc:
+            self._managed_process = managed
+            self._proc = managed.process
+        except (ExecutionError, OSError, ValueError) as exc:
             raise DiscoveryError(
                 f"Failed to start stdio MCP server: {safe_log_text(exc)}"
             ) from exc
@@ -552,6 +554,13 @@ class StdioMcpClient:
             self._stdout_thread = None
             self._stderr_thread = None
             self._proc = None
+            managed = self._managed_process
+            self._managed_process = None
+            if managed is not None:
+                try:
+                    managed.release()
+                except ExecutionError:
+                    pass
 
     def _write_message(self, message: dict[str, Any]) -> None:
         proc = self._ensure_running()
@@ -695,6 +704,7 @@ class StdioMcpClient:
             "protocol_negotiated": self.negotiated_protocol_version,
             "capabilities": self.server_capabilities or {},
             "server_info": self.server_info or {},
+            "executor": self.executor.name,
         }
 
 
@@ -767,13 +777,13 @@ class StreamableHttpMcpClient:
         self.allow_private_network = bool(allow_private_network)
         self.allow_insecure_http = bool(allow_insecure_http)
         self.allow_loopback = bool(allow_loopback)
+        self._dns_policy = DnsPinningPolicy(
+            allow_private_network=self.allow_private_network,
+            allow_insecure_http=self.allow_insecure_http,
+            allow_loopback=self.allow_loopback,
+        )
         try:
-            self.url = validate_mcp_url(
-                url,
-                allow_private_network=self.allow_private_network,
-                allow_insecure_http=self.allow_insecure_http,
-                allow_loopback=self.allow_loopback,
-            )
+            self.url = self._dns_policy.validate(url)
         except InputValidationError as exc:
             raise DiscoveryError(str(exc)) from exc
         self.timeout = _validate_timeout(timeout)
@@ -1211,12 +1221,7 @@ class StreamableHttpMcpClient:
 
     def _open(self, request: urllib.request.Request, *, timeout: float) -> Any:
         try:
-            validate_mcp_url(
-                self.url,
-                allow_private_network=self.allow_private_network,
-                allow_insecure_http=self.allow_insecure_http,
-                allow_loopback=self.allow_loopback,
-            )
+            self._dns_policy.validate(self.url)
         except InputValidationError as exc:
             raise DiscoveryError(str(exc)) from exc
         return self._opener.open(request, timeout=max(0.001, timeout))
@@ -1263,6 +1268,8 @@ class StreamableHttpMcpClient:
             "server_info": self.server_info or {},
             "authenticated": self.credential_provider is not None,
             "session_recoveries": self._session_recoveries,
+            "dns_pinning": True,
+            "pinned_addresses": list(self._dns_policy.pinned_addresses(self.url)),
         }
 
 
@@ -1304,6 +1311,7 @@ def _discover_config_server(
     client_cert: str | None,
     client_key: str | None,
     refresh_on_list_changed: float,
+    command_executor: ProcessExecutor | None,
 ) -> SourceResult:
     if not isinstance(cfg, dict):
         raise DiscoveryError(f"Config for server '{safe_log_text(name)}' must be an object")
@@ -1398,6 +1406,7 @@ def _discover_config_server(
         inherit_env=inherit_env,
         compat_stdio_noise=compat_stdio_noise,
         protocol_version=protocol_version,
+        executor=command_executor,
     ) as client:
         raw_tools = client.list_tools(max_tools=max_tools, max_pages=max_pages)
         list_changed = False
@@ -1416,6 +1425,7 @@ def _discover_config_server(
             "compat_stdio_noise": compat_stdio_noise,
             "list_changed_received": list_changed,
             "refresh_count": int(list_changed),
+            "executor": client.executor.name,
             **protocol_metadata,
         },
     )

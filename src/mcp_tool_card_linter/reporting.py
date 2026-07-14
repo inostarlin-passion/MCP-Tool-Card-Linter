@@ -11,7 +11,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
-from .models import MAX_LINT_TOOLS, LintReport, SEVERITY_ORDER
+from .models import BaselineEntry, MAX_LINT_TOOLS, LintReport, SEVERITY_ORDER
 from .rules import rule_metadata
 from .security import safe_log_text
 
@@ -114,6 +114,10 @@ def report_to_markdown(report: LintReport) -> str:
                 f"- Changed: `{baseline.get('changed', 0)}`",
                 f"- New: `{baseline.get('new', 0)}`",
                 f"- Missing: `{baseline.get('missing', 0)}`",
+                f"- Identity changed: `{baseline.get('identity_changed', 0)}`",
+                f"- Publisher changed: `{baseline.get('publisher_changed', 0)}`",
+                f"- Untrusted legacy matches: `{baseline.get('untrusted', 0)}`",
+                f"- Trust status: `{baseline.get('trust', {}).get('trust_status', 'not_checked')}`",
             ]
         )
 
@@ -164,6 +168,19 @@ def report_to_markdown(report: LintReport) -> str:
                 "",
             ]
         )
+        diff = tool.get("baseline_diff", {})
+        diff_paths = [
+            *diff.get("added", []),
+            *diff.get("removed", []),
+            *diff.get("changed", []),
+        ]
+        if diff_paths:
+            lines.extend(
+                [
+                    f"- Changed fields: {_code(', '.join(diff_paths))}",
+                    "",
+                ]
+            )
         if tool["issues"]:
             lines.extend(["| Severity | Code | Path | Finding | Recommendation |", "| --- | --- | --- | --- | --- |"])
             for issue in tool["issues"]:
@@ -433,7 +450,15 @@ def optimize_from_report(report_payload: dict[str, Any]) -> dict[str, Any]:
         ):
             raise ReportError(f"Report tools[{index}].card_fingerprint is invalid")
         baseline_status = tool.get("baseline_status", "not_checked")
-        if baseline_status not in {"not_checked", "new", "unchanged", "changed"}:
+        if baseline_status not in {
+            "not_checked",
+            "new",
+            "unchanged",
+            "changed",
+            "identity_changed",
+            "publisher_changed",
+            "baseline_untrusted",
+        }:
             raise ReportError(f"Report tools[{index}].baseline_status is invalid")
         decision = "include_by_default"
         if risk == "critical" or any(
@@ -466,10 +491,10 @@ def optimize_from_report(report_payload: dict[str, Any]) -> dict[str, Any]:
 
 def baseline_fingerprints_from_payload(
     report_payload: dict[str, Any],
-) -> dict[tuple[str, str], str]:
+) -> dict[tuple[str, str], BaselineEntry]:
     """Extract and validate a trusted tool-card fingerprint baseline."""
     _validate_report_root(report_payload)
-    fingerprints: dict[tuple[str, str], str] = {}
+    fingerprints: dict[tuple[str, str], BaselineEntry] = {}
     for index, tool in enumerate(report_payload["tools"]):
         if not isinstance(tool, dict):
             raise ReportError(f"Baseline tools[{index}] must be an object")
@@ -482,6 +507,24 @@ def baseline_fingerprints_from_payload(
             raise ReportError(f"Baseline tools[{index}].tool_name is invalid")
         if not isinstance(fingerprint, str) or not _FINGERPRINT.fullmatch(fingerprint):
             raise ReportError(f"Baseline tools[{index}].card_fingerprint is invalid or missing")
+        raw_fields = tool.get("field_fingerprints", {})
+        if not isinstance(raw_fields, dict) or len(raw_fields) > 4097:
+            raise ReportError(
+                f"Baseline tools[{index}].field_fingerprints must be a bounded object"
+            )
+        field_fingerprints: dict[str, str] = {}
+        for pointer, field_fingerprint in raw_fields.items():
+            if (
+                not isinstance(pointer, str)
+                or not pointer.startswith("/")
+                or len(pointer) > 10_000
+                or not isinstance(field_fingerprint, str)
+                or not _FINGERPRINT.fullmatch(field_fingerprint)
+            ):
+                raise ReportError(
+                    f"Baseline tools[{index}].field_fingerprints is invalid"
+                )
+            field_fingerprints[pointer] = field_fingerprint
         identity = (
             safe_log_text(server_name, limit=512),
             safe_log_text(tool_name, limit=512),
@@ -490,7 +533,10 @@ def baseline_fingerprints_from_payload(
             raise ReportError(
                 f"Baseline contains duplicate tool identity {safe_log_text(server_name)}/{safe_log_text(tool_name)}"
             )
-        fingerprints[identity] = fingerprint
+        fingerprints[identity] = BaselineEntry(
+            card_fingerprint=fingerprint,
+            field_fingerprints=field_fingerprints,
+        )
     return fingerprints
 
 
@@ -590,7 +636,7 @@ def _validate_report_root(report_payload: Any) -> None:
     if len(tools) > MAX_LINT_TOOLS:
         raise ReportError(f"Report has more than {MAX_LINT_TOOLS} tools")
     schema_version = report_payload.get("report_schema_version")
-    if schema_version is not None and schema_version != "1.0.0":
+    if schema_version is not None and schema_version not in {"1.0.0", "1.1.0"}:
         raise ReportError(
             f"Unsupported report schema version: {safe_log_text(schema_version)}"
         )

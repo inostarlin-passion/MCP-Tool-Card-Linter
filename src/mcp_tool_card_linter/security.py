@@ -7,6 +7,8 @@ import os
 import re
 import socket
 import stat
+import threading
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlsplit, urlunsplit
@@ -44,6 +46,76 @@ class InputValidationError(ValueError):
 
 class DuplicateJsonKeyError(InputValidationError):
     """Raised when a JSON object contains an ambiguous duplicate member name."""
+
+
+@dataclass(slots=True)
+class DnsPinningPolicy:
+    """Reject endpoint DNS changes across validation and retry boundaries.
+
+    The policy deliberately fails closed. It complements, but does not replace,
+    network-namespace or egress-proxy enforcement for hostile networks.
+    """
+
+    allow_private_network: bool = False
+    allow_insecure_http: bool = False
+    allow_loopback: bool = True
+    max_endpoints: int = 128
+    _pins: dict[
+        tuple[str, int],
+        tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...],
+    ] = field(default_factory=dict, init=False, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.max_endpoints, bool)
+            or not isinstance(self.max_endpoints, int)
+            or not 1 <= self.max_endpoints <= 4096
+        ):
+            raise ValueError("max_endpoints must be an integer in 1..4096")
+
+    def validate(self, url: str) -> str:
+        validated = validate_mcp_url(
+            url,
+            allow_private_network=self.allow_private_network,
+            allow_insecure_http=self.allow_insecure_http,
+            allow_loopback=self.allow_loopback,
+        )
+        parsed = urlsplit(validated)
+        assert parsed.hostname is not None
+        host = parsed.hostname.rstrip(".").lower()
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        addresses = tuple(_resolve_addresses(host, port, True))
+        _validate_addresses(
+            addresses,
+            allow_private_network=self.allow_private_network,
+            allow_loopback=self.allow_loopback,
+            config_sourced=not self.allow_loopback,
+        )
+        key = (host, port)
+        with self._lock:
+            previous = self._pins.get(key)
+            if previous is not None and previous != addresses:
+                raise InputValidationError(
+                    "MCP server DNS resolution changed after it was pinned; "
+                    "request refused as a possible DNS rebinding attempt"
+                )
+            if previous is None:
+                if len(self._pins) >= self.max_endpoints:
+                    raise InputValidationError(
+                        f"DNS pinning policy exceeded {self.max_endpoints} endpoints"
+                    )
+                self._pins[key] = addresses
+        return validated
+
+    def pinned_addresses(self, url: str) -> tuple[str, ...]:
+        parsed = urlsplit(url)
+        if parsed.hostname is None:
+            return ()
+        host = parsed.hostname.rstrip(".").lower()
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        with self._lock:
+            return tuple(str(address) for address in self._pins.get((host, port), ()))
 
 
 def strict_json_loads(text: str) -> Any:
@@ -167,18 +239,12 @@ def validate_mcp_url(
     if not addresses and host == "localhost":
         loopback_only = True
 
-    for address in addresses:
-        if address.is_loopback:
-            if allow_loopback:
-                continue
-            raise InputValidationError(
-                "MCP server resolves to a loopback address; explicit private-network approval is required for config-sourced URLs"
-            )
-        if not address.is_global and not allow_private_network:
-            raise InputValidationError(
-                f"MCP server resolves to non-public address {address}; "
-                "use --allow-private-network only for a trusted endpoint"
-            )
+    _validate_addresses(
+        addresses,
+        allow_private_network=allow_private_network,
+        allow_loopback=allow_loopback,
+        config_sourced=not allow_loopback,
+    )
     if (
         parsed.scheme == "http"
         and not (loopback_only and allow_loopback)
@@ -281,6 +347,29 @@ def _resolve_addresses(host: str, port: int, resolve_hostnames: bool) -> list[ip
     if not addresses:
         raise InputValidationError(f"Hostname resolved to no addresses: {safe_log_text(host)}")
     return sorted(addresses, key=lambda item: (item.version, int(item)))
+
+
+def _validate_addresses(
+    addresses: Iterable[ipaddress.IPv4Address | ipaddress.IPv6Address],
+    *,
+    allow_private_network: bool,
+    allow_loopback: bool,
+    config_sourced: bool,
+) -> None:
+    for address in addresses:
+        if address.is_loopback:
+            if allow_loopback:
+                continue
+            qualifier = " for config-sourced URLs" if config_sourced else ""
+            raise InputValidationError(
+                "MCP server resolves to a loopback address; explicit private-network "
+                f"approval is required{qualifier}"
+            )
+        if not address.is_global and not allow_private_network:
+            raise InputValidationError(
+                f"MCP server resolves to non-public address {address}; "
+                "use --allow-private-network only for a trusted endpoint"
+            )
 
 
 def _contains_control(value: str) -> bool:

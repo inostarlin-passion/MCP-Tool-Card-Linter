@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/inostarlin-passion/MCP-Tool-Card-Linter/v0.4.0/src/mcp_tool_card_linter/schemas/report.schema.json",
+  "$schema": "https://raw.githubusercontent.com/inostarlin-passion/MCP-Tool-Card-Linter/v0.5.0/src/mcp_tool_card_linter/schemas/report.schema.json",
   "facts": [
     "MCP tools are model-callable capabilities described by metadata such as name, description, and input schema.",
     "MCP uses JSON-RPC messages over transports such as stdio and Streamable HTTP.",
@@ -22,16 +22,16 @@
     "suppressed_findings": []
   },
   "protocol": [],
-  "report_schema_version": "1.0.0",
+  "report_schema_version": "1.1.0",
   "rule_catalog_version": "1.0.0",
-  "scan_id": "urn:sha256:9065578d29682d9e6b9193bdd8aee0b0687813367402051e65b7d77c23f0db57",
+  "scan_id": "urn:sha256:7c8220e1cf61e25d61bb45dea445ca65f95eefa0138ad29e1c34e5ca5e5d90ad",
   "sources": [
     {
       "errors": [],
       "metadata": {
         "path": "/Users/inostarlin/code/MCP-Tool-Card-Linter/examples/bad-tools.json"
       },
-      "server_name": "sample",
+      "server_name": "static",
       "source_type": "tools-file",
       "tools_discovered": 2,
       "tools_linted": 2,
@@ -51,9 +51,19 @@
     "baseline": {
       "changed": 0,
       "checked": false,
+      "identity_changed": 0,
       "missing": 0,
       "new": 0,
-      "unchanged": 0
+      "publisher_changed": 0,
+      "trust": {
+        "binding_status": "not_checked",
+        "key_id": null,
+        "publisher": null,
+        "server_identity": null,
+        "trust_status": "not_checked"
+      },
+      "unchanged": 0,
+      "untrusted": 0
     },
     "issues_by_severity": {
       "critical": 1,
@@ -72,12 +82,25 @@
     "sources_scanned": 1,
     "tools_scanned": 2
   },
-  "tool_version": "0.4.0",
+  "tool_version": "0.5.0",
   "tools": [
     {
+      "baseline_diff": {
+        "added": [],
+        "changed": [],
+        "removed": [],
+        "truncated": false
+      },
       "baseline_status": "not_checked",
       "card_fingerprint": "sha256:55775a2a0e3403cc1e377112e224a32a6f1e6a68d632b02bc53b5492c3e0e53f",
       "estimated_card_chars": 138,
+      "field_fingerprints": {
+        "/description": "sha256:30764db69360727892a0da3f0a8f5c40f1e3b67adee4ac53714ebf3318255c66",
+        "/inputSchema/properties/msg/type": "sha256:e9e5c1c9e4f6277339d1bcde0733a59bd42f8731f449da6dc13010a916930d48",
+        "/inputSchema/properties/to/type": "sha256:e9e5c1c9e4f6277339d1bcde0733a59bd42f8731f449da6dc13010a916930d48",
+        "/inputSchema/type": "sha256:626992da9517ee49930ee1340383a0cc334563d9aa429619a17842d0eeecb524",
+        "/name": "sha256:9e27aae53b6b23f2670ea46090b960264264ae9ecc7c5e1e1c55a49deda01c2b"
+      },
       "issues": [
         {
           "code": "GENERIC_TOOL_NAME",
@@ -343,13 +366,28 @@
       ],
       "risk_level": "medium",
       "score": 57,
-      "server_name": "sample",
+      "server_name": "static",
       "tool_name": "send"
     },
     {
+      "baseline_diff": {
+        "added": [],
+        "changed": [],
+        "removed": [],
+        "truncated": false
+      },
       "baseline_status": "not_checked",
       "card_fingerprint": "sha256:993476025cf09f497da264aac7eff74ce59b43e466f0945de4092959307dbffb",
       "estimated_card_chars": 325,
+      "field_fingerprints": {
+        "/description": "sha256:91d488b1c35bb1631e280d0fa74fbac098d1b1a6b96cbe602aff375e53b68bfb",
+        "/inputSchema/additionalProperties": "sha256:fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "/inputSchema/properties/issue_url/description": "sha256:185136db07aff308640a644a0dd619a08ab51b5313c6eaf6c37995c42116a442",
+        "/inputSchema/properties/issue_url/type": "sha256:e9e5c1c9e4f6277339d1bcde0733a59bd42f8731f449da6dc13010a916930d48",
+        "/inputSchema/required/0": "sha256:4c25a0197288c4a1f11f219ae12b98557d542d5a2be7c778266fab7b20390092",
+        "/inputSchema/type": "sha256:626992da9517ee49930ee1340383a0cc334563d9aa429619a17842d0eeecb524",
+        "/name": "sha256:ee8e4a4dd6fd96a9901f57af6b2e14781c668df797511568221ecc66a71de97c"
+      },
       "issues": [
         {
           "code": "MISSING_SIDE_EFFECT_WARNING",
@@ -510,7 +548,7 @@
       ],
       "risk_level": "critical",
       "score": 44,
-      "server_name": "sample",
+      "server_name": "static",
       "tool_name": "summarize_issue"
     }
   ],
@@ -518,5 +556,5 @@
     "Tool Card is an engineering term in this project, not a formal MCP specification object.",
     "A static linter cannot verify whether server implementation behavior matches its metadata."
   ],
-  "version": "0.4.0"
+  "version": "0.5.0"
 }

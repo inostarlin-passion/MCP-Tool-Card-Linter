@@ -1,6 +1,6 @@
 # 研究依据与可核验推理
 
-检索与复核日期：2026-07-13。
+检索与复核日期：2026-07-14。
 
 ## 检索方法
 
@@ -15,6 +15,7 @@
 7. 针对 v0.3 生产化增量继续做多跳核验：MCP lifecycle→version/capability negotiation→tools capability；transport→stdio purity/SSE→Retry-After RFC；authorization→RFC 9728/8414/8707/PKCE；报告→SARIF 2.1.0→GitHub ingestion limits；发布→PyPI Trusted Publishing→OIDC/attestation；SBOM→CycloneDX Python 工具。
 8. 针对 v0.4 一致性增量复核 MCP Streamable HTTP 的空 `data` 预热事件、SSE `id`/`retry`、GET + `Last-Event-ID` 恢复和 `tools/list_changed`；再沿 MCP Authorization 跳转 RFC 9728、RFC 8414/OIDC discovery、RFC 7636、RFC 8707，并实际执行官方 conformance runner 0.1.15 的 2025-11-25 `initialize` 场景。
 9. 针对 GitHub Actions run `29263797177` 做“check→job→失败 step→原始日志”多跳定位；再以 Python raw/buffered I/O、`tracemalloc`、coverage.py 和 mypy 的官方文档复核短读、插桩开销与平台 typeshed 行为，避免用放宽 timeout 掩盖实现问题。
+10. 针对 v0.5 沿 MCP local-server/SSRF 指南继续跳转 Docker 官方运行时限制、Bubblewrap 官方实现、Microsoft Job Object、RFC 8785、RFC 8032、pyca/cryptography 与 Sigstore bundle/identity verification 文档；再用 OWASP SSRF 指南交叉检查 IPv4/IPv6、metadata 地址和 DNS rebinding 边界。
 
 优先级为：正式规范/RFC/标准库官方文档 > OWASP/CWE > 论文原文 > 开源实现说明。论文为预印本或经验研究时，不把其结论表述为协议保证。
 
@@ -101,6 +102,30 @@
 27. mypy 默认使用当前运行平台的 typeshed 视图，并支持 `--platform` 显式复核其他平台。`os.killpg` 是 Unix API，因此即使运行时调用者有 `os.name` 判断，函数定义仍需使用 mypy 能识别的平台分支。
     来源：[mypy platform configuration](https://mypy.readthedocs.io/en/stable/command_line.html#platform-configuration)、[Python `os.killpg`](https://docs.python.org/3/library/os.html#os.killpg)
 
+28. MCP Security Best Practices 对 one-click 本地 server 要求执行前明确 consent、完整显示命令并允许取消；还建议以平台 sandbox 限制 filesystem/network/privilege。它同时把 internal IP、metadata、localhost、DNS rebinding 和 redirect chain 列为 SSRF 模式。
+    来源：[MCP Security Best Practices](https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices)
+
+29. Docker 官方 CLI 提供 `--network none`、`--read-only`、`--cap-drop`、`--security-opt no-new-privileges`、`--pids-limit`、`--memory` 和 `--cpus`；无 memory limit 时容器默认可使用任意可用内存，因此这些限制必须显式设置。
+    来源：[docker container run](https://docs.docker.com/reference/cli/docker/container/run)、[Running containers](https://docs.docker.com/engine/containers/run/)
+
+30. Bubblewrap 从空 mount namespace 组装可见文件系统；`--ro-bind` 提供只读绑定，`--unshare-all` 包含 network namespace，`--die-with-parent` 把 child 生命周期绑定到父进程。它是低级构件，最终 policy 仍由调用方负责。
+    来源：[Bubblewrap project](https://github.com/containers/bubblewrap)、[Bubblewrap option implementation](https://github.com/containers/bubblewrap/blob/main/bubblewrap.c)
+
+31. Windows Job Object 把进程组作为单元管理，可用 `SetInformationJobObject` 设置 active-process、memory、CPU 等限制；`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 会在最后一个 job handle 关闭时终止关联进程及子 job hierarchy。
+    来源：[Microsoft Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)、[SetInformationJobObject](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-setinformationjobobject)
+
+32. RFC 8785 规定用于 hash/sign 的 JSON 必须限制在 I-JSON、按 ECMAScript 序列化 primitive、确定性排序 property 并输出 UTF-8；普通 `sort_keys` JSON 在数字等边界并不等价。Trail of Bits 的 `rfc8785` 0.1.4 是无依赖实现并通过 Trusted Publishing 发布。
+    来源：[RFC 8785](https://www.rfc-editor.org/rfc/rfc8785)、[rfc8785 package](https://pypi.org/project/rfc8785/)
+
+33. RFC 8032 定义 Ed25519：32-byte public/private key material 和 64-byte signature，并提供测试向量。pyca/cryptography 提供 Ed25519 sign/verify 与 PEM serialization；密钥文件权限和 public-key 信任分发仍是调用方责任。
+    来源：[RFC 8032](https://www.rfc-editor.org/rfc/rfc8032)、[pyca cryptographic primitives](https://cryptography.io/en/stable/hazmat/primitives/)
+
+34. Sigstore 的验证模型同时检查 signature、artifact digest 和预期 identity/issuer；bundle 可携带离线验证材料和透明日志证明。这支持“签名必须绑定预期 publisher/server identity，不能只验证任意 key 的数学签名”的设计原则。
+    来源：[Sigstore verifying signatures](https://docs.sigstore.dev/cosign/verifying/verify/)、[Sigstore bundle format](https://docs.sigstore.dev/about/bundle/)
+
+35. OWASP SSRF 指南要求同时处理 IPv4/IPv6 的 private、localhost、link-local 等非公网范围，并指出 cloud metadata 是常见凭据窃取目标。应用层重复 DNS 校验不能替代网络层 allowlist/egress control。
+    来源：[OWASP SSRF Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html)
+
 ## 从事实到实现的推理链
 
 | 事实/威胁 | 第一性原理 | 本项目措施 |
@@ -108,15 +133,16 @@
 | 模型会看到 description/schema 等 metadata | 能改变模型决策的所有外部文本都属于不可信输入 | 递归扫描 name/title/description/input/output schema/annotation/execution/_meta 的 key 与 string value；限制节点、深度和总字符数 |
 | annotation 只是 hint | 声明不能证明行为，冲突本身是风险信号 | 类型校验；检查 read-only/destructive/open-world 冲突；风险仍由 name/description/schema 独立推断 |
 | 同名工具共享模型上下文 | 名称冲突降低路由确定性并可形成 shadowing | 同 server duplicate 为 error；跨 server 同名为 `CROSS_SERVER_TOOL_SHADOWING` |
-| 首次审批后 metadata 可变化 | 审批对象必须有稳定身份才可检测变化 | 对 canonical complete raw card 做 SHA-256；`--baseline-report` 区分 unchanged/changed/new/missing；changed 默认 block until review |
+| 首次审批后 metadata 可变化 | 审批对象必须有稳定身份才可检测变化 | RFC 8785 complete-card/field SHA-256；Ed25519 bundle 绑定 publisher/server/source；区分 changed/identity/publisher/untrusted；changed 默认 block |
 | Schema 是调用边界 | 只有约束实际参数空间才能降低误用/资源/注入风险 | 检查 root/type/composition/ref/bounds/additionalProperties/array/string/regex；标记 command/URL/path/secret 参数和 external `$ref` |
 | 不可信 endpoint 可耗尽或触达内网 | timeout 不能限制已经读入的内存，也不能终止重复 cursor | 文件、HTTP body、stdio line、stderr、队列、page、cursor、tool、schema、server、worker、retry 全部硬上限；重复 cursor 失败关闭 |
-| config command 等价于本地代码执行 | “读取配置”不应隐式扩大为“运行配置” | 默认拒绝；要求 `--allow-config-execution`；默认最小环境；`--inherit-env` 单独授权；报告 command 参数脱敏 |
-| URL validation 与 fetch 之间可能变化 | 仅解析 scheme 不能阻止 SSRF/redirect/rebinding | HTTPS 默认、private/reserved 检查、config loopback 授权、禁用 redirect、每次 request 前重验；文档明确 DNS TOCTOU 剩余风险 |
+| config command 等价于本地代码执行 | “读取配置”不应隐式扩大为“运行配置” | executor 默认 none；config 另需 consent；Docker/Bubblewrap/Job Object 后端；host 显式不安全；最小环境与 command 脱敏 |
+| URL validation 与 fetch 之间可能变化 | 仅解析 scheme 不能阻止 SSRF/redirect/rebinding | HTTPS/public 默认、禁 redirect、每次 open 重验、DNS 地址集跨请求 pin；高保证仍要求 egress policy |
 | 部分写入会制造假报告 | 报告是 CI/审批输入，完整性优先于便利 | `mkstemp` + flush/fsync + `os.replace`；失败保留旧文件；POSIX 新文件 0600；Markdown/diagnostic 转义和 secret redaction |
 | 协议版本与能力会演进 | 互操作必须基于双方共同版本与显式能力，而不是本地常量猜测 | 支持 2025-11-25/2025-06-18 allowlist；记录 requested/negotiated/capabilities；后续 HTTP header 使用 negotiated；无 tools capability 则 `unsupported_feature` |
 | 规范 Schema 与启发式是不同事实层 | 元模式回答合法性，质量/安全规则回答工程风险 | `Draft202012Validator.check_schema` 完整校验；不同 schema 结果有界 LRU 缓存；其后继续执行本项目 bounded walker |
-| 组织需要稳定机器消费 | CI 不能依赖会变化的终端文案 | report schema 1.0.0、scan ID、JSON Pointer、rule metadata、deterministic JSON、SARIF/JUnit/JSONL/GitHub annotations |
+| 组织需要稳定机器消费 | CI 不能依赖会变化的终端文案 | report schema 1.1.0、scan ID、JSON Pointer、rule metadata、deterministic JSON、SARIF/JUnit/JSONL/GitHub annotations |
+| 审批记录可能并发交错或事后改写 | 审批顺序和内容必须同时可验证 | `O_EXCL` writer lock；sequence + previous hash + domain-separated Ed25519；全链验证；POSIX 0600 |
 | 例外会成为永久绕过 | suppression 必须可归责并自动失效 | TOML policy 要求 reason/owner/expires；到期 finding 恢复且 expired record 进入报告 |
 | 认证材料容易从 argv/URL/报告泄漏 | token 的输入面应与普通配置分离 | 只从 env/0600 file 提供预签发 Bearer token；endpoint/proxy 禁止 userinfo；报告只记录 authenticated boolean；自定义 CA/proxy/mTLS 分离 |
 | SSE 连接会正常中断且事件可能滞后 | 网络连接不是事务边界；恢复必须有游标、deadline 和重复上限 | 增量 parser；空预热事件；`id`/`retry`；GET + `Last-Event-ID`；总 timeout、3 次重连、行/body/event 上限 |
@@ -129,16 +155,16 @@
 
 1. 静态 metadata lint 适合作为“连接前/发布前 gate”，不能成为运行时唯一安全边界。
 2. 对可能写、删除、付费、联网、文件访问、代码执行或处理 secret 的工具，低误报不是最高目标；默认要求审批更符合最小权限原则。
-3. fingerprint 只回答“是否变化”，不回答“谁发布”或“首次版本是否可信”。签名、可信分发和 baseline 访问控制属于更高一层。
+3. 签名回答“持有该 private key 的主体批准了什么”，但 key 与真实 publisher 的对应关系仍来自带外信任；因此 verifier 必须同时配置预期 key 和 publisher/server claim。
 4. 对 config command 采用显式授权会带来一次额外 CLI flag，但它避免把看似只读的扫描动作变成静默 RCE，安全收益明显高于兼容成本。
 5. description 质量和长度存在可靠性/成本权衡，因此本项目报告缺失边界与过长文本，而不自动扩写或声称越长越好。
 
 ## 不确定与剩余边界
 
 1. 规则是可解释的启发式，可能有 false positive/false negative；尤其无法静态证明 server implementation 与 card 一致。
-2. 标准库 DNS 解析无法无竞态地 pin 到后续 socket；高保证部署仍需 egress proxy/network policy。项目已禁 redirect、重复校验和默认阻止 private/reserved 地址，但不宣称消除 DNS rebinding。
-3. Streamable HTTP v0.4 覆盖 discovery 所需的 initialize、notification、分页 tools/list、JSON/SSE、GET listener/resumption、list_changed 和 session cleanup；它不是通用 SDK，未声明或实现 sampling、roots、elicitation、experimental tasks 及全部 draft 行为。
-4. POSIX 使用独立 session 尽力终止进程组；Windows 能关闭直接子进程和 pipe，但没有实现 Job Object，因此不能保证清理任意脱离/再派生的后代。
-5. SHA-256 baseline 未签名。若 baseline 和当前报告能被同一攻击者修改，change detection 失效。
+2. 标准库 DNS 解析无法无竞态地把已验证 IP 直接固定到后续 TLS socket；高保证部署仍需 egress proxy/network policy。地址集 pin 能检测变化，但不宣称消除所有 DNS TOCTOU。
+3. Streamable HTTP v0.5 覆盖 discovery 所需的 initialize、notification、分页 tools/list、JSON/SSE、GET listener/resumption、list_changed 和 session cleanup；它不是通用 SDK，未声明或实现 sampling、roots、elicitation、experimental tasks 及全部 draft 行为。
+4. Docker/Bubblewrap 的隔离强度依赖 runtime/kernel policy；Windows Job Object 只约束进程树和资源，不提供网络/文件系统 sandbox；显式 host backend 不隔离。
+5. Ed25519 baseline 不能证明首次审批正确，也不能抵御 private key 被盗、public key 被替换或 approval log 被有权访问文件系统的攻击者整体截断；需要独立 key 分发与 WORM/透明日志。
 6. 本项目只扫描 tool card，不扫描 MCP prompts/resources、server source code、依赖漏洞、runtime tool output 或多步 toxic flow；应与 sandbox、SAST/SCA、runtime policy、audit 和人工复核组合。
-7. OAuth v0.4 是预注册 public-client 流程；不自动启动浏览器、不实现 DCR/Client ID Metadata Document、refresh-token rotation 或 runtime insufficient-scope step-up。token audience 最终仍必须由 authorization/resource server 验证。
+7. OAuth v0.5 仍是预注册 public-client 流程；不自动启动浏览器、不实现 DCR/Client ID Metadata Document、refresh-token rotation 或 runtime insufficient-scope step-up。token audience 最终仍必须由 authorization/resource server 验证。

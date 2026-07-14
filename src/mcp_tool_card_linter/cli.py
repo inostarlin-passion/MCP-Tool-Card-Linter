@@ -17,8 +17,14 @@ from .discovery import (
     discover_from_stdio_command,
     load_tools_file,
 )
+from .execution import (
+    ExecutionError,
+    ExecutionLimits,
+    ProcessExecutor,
+    executor_from_options,
+)
 from .lint import lint_sources
-from .models import LintConfig, SourceResult
+from .models import BaselineAssessment, LintConfig, SourceResult
 from .oauth import (
     callback_url_from_environment,
     callback_url_from_file,
@@ -51,6 +57,17 @@ from .security import (
     load_json_file,
     safe_log_text,
 )
+from .trust import (
+    TrustError,
+    append_approval_record,
+    assess_baseline,
+    create_baseline_bundle,
+    generate_key_pair,
+    is_signed_baseline,
+    verify_approval_log,
+    verify_baseline_bundle,
+    write_baseline_bundle,
+)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -67,9 +84,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_explain(args)
         if args.command == "authorize":
             return _run_authorize(args)
+        if args.command == "baseline":
+            return _run_baseline(args)
         parser.print_help(sys.stderr)
         return 2
-    except (DiscoveryError, ReportError, InputValidationError) as exc:
+    except (
+        DiscoveryError,
+        ExecutionError,
+        ReportError,
+        InputValidationError,
+        TrustError,
+    ) as exc:
         print(f"error: {safe_log_text(exc)}", file=sys.stderr)
         return 2
     except OSError as exc:
@@ -110,7 +135,24 @@ def build_parser() -> argparse.ArgumentParser:
     lint_parser.add_argument("--jsonl-report", help="Write streaming JSON Lines records")
     lint_parser.add_argument(
         "--baseline-report",
-        help="Compare tool-card SHA-256 fingerprints with a previous JSON report",
+        help="Compare against a previous JSON report or signed baseline bundle",
+    )
+    lint_parser.add_argument(
+        "--baseline-public-key",
+        help="Trusted Ed25519 public key for a signed baseline",
+    )
+    lint_parser.add_argument(
+        "--require-signed-baseline",
+        action="store_true",
+        help="Reject legacy unsigned baseline reports",
+    )
+    lint_parser.add_argument(
+        "--expected-publisher",
+        help="Require this publisher claim in the signed baseline",
+    )
+    lint_parser.add_argument(
+        "--expected-server-identity",
+        help="Require this server identity claim in the signed baseline",
     )
     lint_parser.add_argument(
         "--fail-on",
@@ -144,6 +186,41 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-config-execution",
         action="store_true",
         help="Execute local commands found in a reviewed config file",
+    )
+    lint_parser.add_argument(
+        "--executor",
+        choices=["none", "host", "docker", "bubblewrap", "windows-job"],
+        default="none",
+        help="Local command boundary; host is explicitly unsandboxed (default: none)",
+    )
+    lint_parser.add_argument(
+        "--executor-image",
+        help="Container image for --executor docker",
+    )
+    lint_parser.add_argument(
+        "--executor-memory-mb",
+        type=lambda value: _bounded_int_range(value, 16, 65_536),
+        default=512,
+    )
+    lint_parser.add_argument(
+        "--executor-cpus",
+        type=_bounded_cpu_count,
+        default=1.0,
+    )
+    lint_parser.add_argument(
+        "--executor-processes",
+        type=lambda value: _bounded_int_range(value, 1, 4096),
+        default=64,
+    )
+    lint_parser.add_argument(
+        "--executor-temp-mb",
+        type=lambda value: _bounded_int_range(value, 1, 4096),
+        default=64,
+    )
+    lint_parser.add_argument(
+        "--executor-cpu-seconds",
+        type=lambda value: _bounded_int_range(value, 1, 86_400),
+        default=60,
     )
     lint_parser.add_argument(
         "--inherit-env",
@@ -283,6 +360,41 @@ def build_parser() -> argparse.ArgumentParser:
         authorize_action.add_argument("--client-cert", help="PEM client certificate chain")
         authorize_action.add_argument("--client-key", help="PEM private key for mTLS")
         authorize_action.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
+
+    baseline_parser = subparsers.add_parser(
+        "baseline",
+        help="Create and verify signed baselines and append-only approval logs",
+    )
+    baseline_actions = baseline_parser.add_subparsers(
+        dest="baseline_command",
+        required=True,
+    )
+    baseline_keygen = baseline_actions.add_parser(
+        "keygen", help="Generate an Ed25519 baseline signing key pair"
+    )
+    baseline_keygen.add_argument("--private-key", required=True)
+    baseline_keygen.add_argument("--public-key", required=True)
+    baseline_keygen.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
+
+    baseline_approve = baseline_actions.add_parser(
+        "approve", help="Sign a lint report and optionally append an approval record"
+    )
+    baseline_approve.add_argument("--report", required=True)
+    baseline_approve.add_argument("--output", required=True)
+    baseline_approve.add_argument("--private-key", required=True)
+    baseline_approve.add_argument("--publisher", required=True)
+    baseline_approve.add_argument("--server-identity", required=True)
+    baseline_approve.add_argument("--approved-by", required=True)
+    baseline_approve.add_argument("--approval-log")
+    baseline_approve.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
+
+    baseline_verify = baseline_actions.add_parser(
+        "verify", help="Verify a signed baseline and optional approval hash chain"
+    )
+    baseline_verify.add_argument("--baseline", required=True)
+    baseline_verify.add_argument("--public-key", required=True)
+    baseline_verify.add_argument("--approval-log")
+    baseline_verify.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
@@ -295,10 +407,55 @@ def _run_lint(args: argparse.Namespace) -> int:
         ignore=args.ignore,
     )
     baseline_fingerprints = None
+    verified_baseline = None
+    baseline_assessment = None
     if args.baseline_report:
         baseline_payload = load_json_file(args.baseline_report)
-        baseline_fingerprints = baseline_fingerprints_from_payload(baseline_payload)
+        if not isinstance(baseline_payload, dict):
+            raise ReportError("Baseline input must contain a JSON object")
+        if is_signed_baseline(baseline_payload):
+            if not args.baseline_public_key:
+                raise TrustError(
+                    "--baseline-public-key is required for a signed baseline"
+                )
+            verified_baseline = verify_baseline_bundle(
+                baseline_payload,
+                args.baseline_public_key,
+            )
+            baseline_fingerprints = baseline_fingerprints_from_payload(
+                verified_baseline.report
+            )
+        else:
+            if args.require_signed_baseline:
+                raise TrustError("Unsigned baseline rejected by --require-signed-baseline")
+            if args.baseline_public_key:
+                raise TrustError(
+                    "--baseline-public-key was supplied, but the baseline is unsigned"
+                )
+            if args.expected_publisher or args.expected_server_identity:
+                raise TrustError(
+                    "Publisher and server identity claims require a signed baseline"
+                )
+            baseline_fingerprints = baseline_fingerprints_from_payload(baseline_payload)
+            baseline_assessment = BaselineAssessment(
+                trust_status="untrusted",
+                binding_status="not_checked",
+            )
+    elif (
+        args.baseline_public_key
+        or args.require_signed_baseline
+        or args.expected_publisher
+        or args.expected_server_identity
+    ):
+        raise TrustError("Baseline trust options require --baseline-report")
     sources = _discover_sources(args)
+    if verified_baseline is not None:
+        baseline_assessment = assess_baseline(
+            verified_baseline,
+            sources,
+            expected_publisher=args.expected_publisher,
+            expected_server_identity=args.expected_server_identity,
+        )
     config = LintConfig(
         max_tools=args.max_tools,
         max_schema_depth=args.max_schema_depth,
@@ -310,6 +467,7 @@ def _run_lint(args: argparse.Namespace) -> int:
         sources,
         config,
         baseline_fingerprints=baseline_fingerprints,
+        baseline_assessment=baseline_assessment,
         policy=policy,
         deterministic=args.deterministic,
     )
@@ -350,6 +508,7 @@ def _run_lint(args: argparse.Namespace) -> int:
 
 def _discover_sources(args: argparse.Namespace) -> list[SourceResult]:
     credential_provider = _credential_provider(args)
+    command_executor = _command_executor(args)
     if args.tools_file:
         server_name = args.server or "static"
         return [load_tools_file(args.tools_file, server_name=server_name)]
@@ -374,6 +533,7 @@ def _discover_sources(args: argparse.Namespace) -> list[SourceResult]:
             client_cert=args.client_cert,
             client_key=args.client_key,
             refresh_on_list_changed=args.refresh_on_list_changed,
+            command_executor=command_executor,
         )
     if args.stdio:
         return [
@@ -387,6 +547,7 @@ def _discover_sources(args: argparse.Namespace) -> list[SourceResult]:
                 compat_stdio_noise=args.compat_stdio_noise,
                 protocol_version=args.protocol_version,
                 refresh_on_list_changed=args.refresh_on_list_changed,
+                executor=command_executor,
             )
         ]
     if args.server_url:
@@ -516,6 +677,96 @@ def _run_authorize(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_baseline(args: argparse.Namespace) -> int:
+    if args.baseline_command == "keygen":
+        key_id = generate_key_pair(args.private_key, args.public_key)
+        result: dict[str, object] = {
+            "algorithm": "Ed25519",
+            "key_id": key_id,
+            "private_key": str(_resolved_path(args.private_key)),
+            "public_key": str(_resolved_path(args.public_key)),
+        }
+    elif args.baseline_command == "approve":
+        paths = {
+            "report": _resolved_path(args.report),
+            "output": _resolved_path(args.output),
+            "private_key": _resolved_path(args.private_key),
+        }
+        if len(set(paths.values())) != len(paths):
+            raise TrustError("Baseline report, output, and private key paths must differ")
+        if args.approval_log and _resolved_path(args.approval_log) in set(paths.values()):
+            raise TrustError("Approval log path must differ from baseline inputs and output")
+        report = load_json_file(args.report)
+        if not isinstance(report, dict):
+            raise TrustError("Lint report must contain a JSON object")
+        bundle = create_baseline_bundle(
+            report,
+            private_key_path=args.private_key,
+            publisher=args.publisher,
+            server_identity=args.server_identity,
+            approved_by=args.approved_by,
+        )
+        write_baseline_bundle(bundle, args.output)
+        record = None
+        if args.approval_log:
+            record = append_approval_record(
+                args.approval_log,
+                bundle,
+                private_key_path=args.private_key,
+            )
+        result = {
+            "valid": True,
+            "baseline": str(_resolved_path(args.output)),
+            "key_id": bundle["key_id"],
+            "report_digest": bundle["payload"]["report_digest"],
+            "approval_sequence": record["sequence"] if record else None,
+        }
+    elif args.baseline_command == "verify":
+        payload = load_json_file(args.baseline)
+        if not isinstance(payload, dict):
+            raise TrustError("Signed baseline must contain a JSON object")
+        verified = verify_baseline_bundle(payload, args.public_key)
+        result = {
+            "valid": True,
+            "key_id": verified.key_id,
+            "publisher": verified.binding["publisher"],
+            "server_identity": verified.binding["server_identity"],
+            "report_digest": verified.payload["report_digest"],
+        }
+        if args.approval_log:
+            result["approval_log"] = verify_approval_log(
+                args.approval_log,
+                args.public_key,
+            )
+    else:
+        raise TrustError("Unknown baseline action")
+    print(
+        json.dumps(
+            result,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+    )
+    return 0
+
+
+def _command_executor(args: argparse.Namespace) -> ProcessExecutor:
+    limits = ExecutionLimits(
+        memory_mb=args.executor_memory_mb,
+        cpu_count=args.executor_cpus,
+        process_count=args.executor_processes,
+        temporary_mb=args.executor_temp_mb,
+        cpu_seconds=args.executor_cpu_seconds,
+    )
+    return executor_from_options(
+        args.executor,
+        image=args.executor_image,
+        limits=limits,
+    )
+
+
 def _credential_provider(args: argparse.Namespace) -> CredentialProvider | None:
     if args.bearer_token_env:
         return BearerTokenProvider.from_environment(args.bearer_token_env)
@@ -531,6 +782,26 @@ def _bounded_int(value: str, maximum: int) -> int:
         raise argparse.ArgumentTypeError("must be an integer") from exc
     if not 1 <= number <= maximum:
         raise argparse.ArgumentTypeError(f"must be in 1..{maximum}")
+    return number
+
+
+def _bounded_int_range(value: str, minimum: int, maximum: int) -> int:
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if not minimum <= number <= maximum:
+        raise argparse.ArgumentTypeError(f"must be in {minimum}..{maximum}")
+    return number
+
+
+def _bounded_cpu_count(value: str) -> float:
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a number") from exc
+    if not math.isfinite(number) or not 0.1 <= number <= 64:
+        raise argparse.ArgumentTypeError("must be finite and in 0.1..64")
     return number
 
 
@@ -574,6 +845,7 @@ def _validate_lint_paths(args: argparse.Namespace) -> None:
             args.tools_file,
             args.config,
             args.baseline_report,
+            args.baseline_public_key,
             args.policy,
             args.bearer_token_file,
             args.ca_bundle,

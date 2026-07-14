@@ -1,6 +1,6 @@
 # MCP protocol compatibility
 
-Review date: 2026-07-13. Version: 0.4.0. The matrix describes tested tool-discovery
+Review date: 2026-07-14. Version: 0.5.0. The matrix describes tested tool-discovery
 claims, not a claim that this focused linter is a general-purpose MCP SDK.
 The columns focus on the current and immediately previous release. The allowlist also accepts
 2025-03-26 for base lifecycle/transport compatibility; the official `sse-retry` fixture negotiates
@@ -10,8 +10,8 @@ that version and passes, but fields introduced in later versions are not project
 | --- | --- | --- | --- |
 | Initialize/version negotiation | Tested | Tested | Client requests configured version (latest by default), accepts any of the three allowlisted versions, records requested/negotiated |
 | Capability negotiation | Tested | Tested | `tools/list` is rejected with `unsupported_feature` unless `capabilities.tools` is declared |
-| stdio request/notification | Tested | Tested through shared JSON-RPC path | Strict newline-delimited JSON; bounded compatibility exception for legacy stdout noise |
-| Streamable HTTP POST JSON | Tested | Tested through shared path | JSON response, session header, initialized notification and DELETE cleanup |
+| stdio request/notification | Tested | Tested through shared JSON-RPC path | Strict newline-delimited JSON; bounded compatibility exception; CLI executor is default-deny with host/Docker/Bubblewrap/Job Object choices |
+| Streamable HTTP POST JSON | Tested | Tested through shared path | JSON response, session header, initialized notification, DELETE cleanup, and cross-request DNS-set pinning |
 | Streamable HTTP POST SSE response | Tested | Tested through shared path | Incremental UTF-8/event parser; empty priming events; hard line/body/event limits |
 | GET SSE listener/resumption/Last-Event-ID | Tested | Tested through shared path | Optional listener, POST response resumption, `retry` delay cap and three-reconnect cap |
 | `notifications/tools/list_changed` refresh | Tested | Tested through shared path | Explicit timeout, capability gate, stdio/HTTP event handling and exactly one re-list |
@@ -29,11 +29,11 @@ that version and passes, but fields introduced in later versions are not project
 
 The official MCP lifecycle requires version negotiation and capability-aware operation; the
 transport specification additionally requires stdout purity for stdio and defines JSON/SSE POST,
-optional GET listeners, session headers, resumability and event IDs for Streamable HTTP. v0.4 tests
+optional GET listeners, session headers, resumability and event IDs for Streamable HTTP. v0.5 tests
 these bounded discovery paths and the official initialization vector. It does not declare client
 capabilities for sampling, roots or elicitation, so server-to-client requests for those features are
 outside the negotiated behavior rather than silently accepted.
 
-OAuth v0.4 intentionally supports pre-registered public clients. Dynamic Client Registration,
+OAuth v0.5 intentionally supports pre-registered public clients. Dynamic Client Registration,
 Client ID Metadata Documents, refresh-token rotation, browser automation and automatic
 insufficient-scope step-up are separate lifecycle features and are not claimed here.
