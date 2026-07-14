@@ -17,6 +17,7 @@
 9. 针对 GitHub Actions run `29263797177` 做“check→job→失败 step→原始日志”多跳定位；再以 Python raw/buffered I/O、`tracemalloc`、coverage.py 和 mypy 的官方文档复核短读、插桩开销与平台 typeshed 行为，避免用放宽 timeout 掩盖实现问题。
 10. 针对 v0.5 沿 MCP local-server/SSRF 指南继续跳转 Docker 官方运行时限制、Bubblewrap 官方实现、Microsoft Job Object、RFC 8785、RFC 8032、pyca/cryptography 与 Sigstore bundle/identity verification 文档；再用 OWASP SSRF 指南交叉检查 IPv4/IPv6、metadata 地址和 DNS rebinding 边界。
 11. 针对 v1.0 继续做多跳核验：MCP versioning→current/previous final 生命周期；NIST/OWASP 静态分析评估→precision/recall 与 synthetic prevalence 限制；SOURCE_DATE_EPOCH→Python build backend→两次 wheel/sdist 字节比较；GitHub/Sigstore artifact attestation→PyPI PEP 740；OWASP/NIST logging→最小字段、secret 排除、tamper detection 与 WORM；RFC 9700→PKCE/issuer/resource/audience。
+12. 针对 GitHub Actions run `29310433050` 做“run→17 jobs→4 个失败 job→失败 step→原始日志”检索；四份日志归并到同一 Windows error 87 后，再从 Microsoft Job Object 概览跳转 `JOBOBJECT_BASIC_LIMIT_INFORMATION`、extended structure、`SetInformationJobObject`、`AssignProcessToJobObject`、system error 与 `CloseHandle`，并以 Python ctypes 官方文档复核 foreign-function 原型和资源所有权。
 
 优先级为：正式规范/RFC/标准库官方文档 > OWASP/CWE > 论文原文 > 开源实现说明。论文为预印本或经验研究时，不把其结论表述为协议保证。
 
@@ -148,6 +149,15 @@
 42. RFC 9700 要求 public client 使用 PKCE，S256 是当前不在 authorization request 暴露 verifier 的方法；多 authorization server client 需要 issuer mix-up 防护，access token 应做 resource/audience 与权限限制。这与 v1 保留 exact redirect/state/issuer、S256 和 RFC 8707 resource binding 一致。
     来源：[RFC 9700](https://www.rfc-editor.org/rfc/rfc9700.html)、[RFC 8707](https://www.rfc-editor.org/rfc/rfc8707.html)
 
+43. GitHub Actions run `29310433050` 的 17 个 job 中，失败的 4 个恰好是 Windows + Python 3.11/3.12/3.13/3.14；四份日志均在 `SetInformationJobObject` 返回 Windows error 87，且随后产生三条未关闭 pipe 的 `ResourceWarning`，其余 13 个 job 成功。跨四个解释器的同一 Win32 错误支持“共享 Windows backend 参数错误”，不支持“Python 小版本偶发故障”。
+    来源：[GitHub Actions run 29310433050](https://github.com/inostarlin-passion/MCP-Tool-Card-Linter/actions/runs/29310433050)、[Microsoft system error codes 0–499](https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes--0-499-)
+
+44. Microsoft 定义 `JOB_OBJECT_LIMIT_PROCESS_TIME=0x2`、`JOB_OBJECT_LIMIT_ACTIVE_PROCESS=0x8`、`JOB_OBJECT_LIMIT_PROCESS_MEMORY=0x100`、`JOB_OBJECT_LIMIT_JOB_MEMORY=0x200`；process time 使用 100 ns 单位。ExtendedLimitInformation 的 process/job memory 是不同字段，`SetInformationJobObject` 的 class 9 对应 extended structure。因此 flags 必须只启用已赋予合法值的对应字段。
+    来源：[JOBOBJECT_BASIC_LIMIT_INFORMATION](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_limit_information)、[JOBOBJECT_EXTENDED_LIMIT_INFORMATION](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_extended_limit_information)、[SetInformationJobObject](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-setinformationjobobject)
+
+45. Python ctypes 对 foreign function 的参数与返回值支持显式 `argtypes`/`restype`，这也是把 Windows HANDLE/LPVOID/DWORD/BOOL 宽度写入接口契约的方式；Microsoft 同时要求每个成功打开的 handle 最终由 `CloseHandle` 关闭。创建 Job 后，配置、分配和关闭都应使用明确原型，异常路径不能遗留 Job handle 或子进程 pipe。
+    来源：[Python ctypes](https://docs.python.org/3/library/ctypes.html)、[AssignProcessToJobObject](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-assignprocesstojobobject)、[CloseHandle](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-closehandle)
+
 ## 从事实到实现的推理链
 
 | 事实/威胁 | 第一性原理 | 本项目措施 |
@@ -176,6 +186,8 @@
 | 启发式必须用 ground truth 评价 | 没有显式正负标签就无法计算 FP/FN | 公共 JSONL corpus；只统计明确 labelled pairs；输出 TP/FP/TN/FN、per-rule、digest、precision/recall/F1 和外推限制 |
 | 构建签名与可复现解决不同问题 | 签名绑定 identity，复现绑定 source→artifact；二者都不证明 benign | 同环境两次 wheel/sdist byte compare；SHA-256/SBOM；GitHub/Sigstore provenance；PyPI PEP 740；验证文档明确边界 |
 | 审计日志本身可能泄密或被篡改 | 可归责性不能以复制 secret 为代价，local chain 也不是 WORM | lint/OAuth 只允许固定非敏感字段；actor/time/sequence/hash chain/lock/append/fsync/0600；要求外送 WORM/SIEM |
+| Windows Job flag 与赋值字段不匹配 | native API 只看到结构和 bitmask；注释或变量意图不能修正错误 ABI | 使用 Microsoft 常量的显式名称；只启用 process time/process memory/active process/kill-on-close；测试捕获原始结构并逐字段断言 |
+| 子进程创建后 native sandbox 配置可能失败 | spawn 成功已经取得进程和 pipe 资源；后续异常不自动转移或释放所有权 | 统一失败回滚：kill、bounded wait、关闭 stdin/stdout/stderr；Job handle 仍由 native `finally` 关闭 |
 
 ## 推断
 
@@ -197,3 +209,4 @@
 7. OAuth v1.0 仍是预注册 public-client 流程；不自动启动浏览器、不实现 DCR/Client ID Metadata Document、refresh-token rotation 或 runtime insufficient-scope step-up。token audience 最终仍必须由 authorization/resource server 验证。
 8. 公开准确率 corpus 只有 12 个 synthetic cases、21 个 labelled pairs 和 8 个被计分规则；1.0 precision/recall 不能外推到未标注规则、真实语言分布或 runtime behavior。
 9. operational audit hash chain 未签名，本地管理员可重算或删除；它只提供本地 tamper evidence 和 cooperating-writer serialization，组织级不可抵赖/留存依赖 authenticated central collector/WORM。
+10. 当前 macOS 本地环境无法执行真实 Windows Job Object；新增替身测试能验证 ABI 输入与回滚，真实的 Python 3.11–3.14 Windows 结果必须在修复提交推送后由 GitHub-hosted runner 再验证。旧 run 的 4 个失败不能作为修复后成功证据。

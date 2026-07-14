@@ -15,13 +15,13 @@
 
 | 验收项 | 实测结果 |
 | --- | --- |
-| 全部分层测试 | 141 tests；139 passed、2 platform skips、0 failed；41.258 s |
-| branch coverage | 5,056 statements、2,002 branches；75.49%，通过 75% gate |
+| 全部分层测试 | 143 tests；141 passed、2 platform skips、0 failed；41.678 s |
+| branch coverage | 5,084 statements、2,006 branches；75.81%，通过 75% gate |
 | 规则准确率 | 12 cases、21 explicitly-labelled pairs；TP 8、FP 0、TN 13、FN 0；precision/recall/F1 = 1.0；通过 0.95/0.95 gate |
 | 确定性 fuzz | 500 个 bounded JSON round trips、5 个非法 JSON extensions、300 个 mutated tool shapes；全部通过 |
 | mutation | 6 个安全输入 mutation operators 均被预期 rule 杀死 |
-| soak | 40 次 stdio server start/discover/cleanup；无线程或 descriptor 累积；1.011 test seconds |
-| 性能 | 2,000 cards；规则计算 0.4268 s，peak 7.81 MiB；通过 `<10 s`/`<128 MiB` |
+| soak | 40 次 stdio server start/discover/cleanup；无线程或 descriptor 累积；0.907 test seconds |
+| 性能 | 2,000 cards；规则计算 0.4048 s，peak 7.81 MiB；通过 `<10 s`/`<128 MiB` |
 | 可复现构建 | 同一 source tree/`SOURCE_DATE_EPOCH` 两次构建，wheel 与 sdist 分别 `cmp` 完全相同 |
 | clean install | wheel 与 sdist 均在新 venv 安装成功；version/lint/contract/rules/evaluate smoke 全通过 |
 | 静态质量 | Ruff、strict mypy（native/win32/linux）、compileall、pip check、diff check、workflow YAML parse 全通过 |
@@ -30,12 +30,12 @@
 
 | 层级 | 数量 | v1.0 重点范围 | 结果 |
 | --- | ---: | --- | --- |
-| 单元测试 | 89 | 稳定 contract digest、current/legacy report、accuracy corpus 校验、audit chain/tamper/private mode/concurrent lock；既有 lint/schema/OAuth/executor/trust/security | 87 passed，2 platform skips |
+| 单元测试 | 91 | Windows Job limit flag/field 一致性、失败回滚与 pipe 释放；稳定 contract digest、current/legacy report、accuracy corpus 校验、audit chain/tamper/private mode/concurrent lock；既有 lint/schema/OAuth/executor/trust/security | 89 passed，2 platform skips |
 | 集成测试 | 40 | `contract`、`evaluate`、`validate-report`、lint audit→verify；既有 CLI/stdio/HTTP/SSE/OAuth/signed baseline | 40/40 passed |
 | 系统测试 | 9 | repeated stdio lifecycle、signed rug pull/publisher drift、default-deny execution、config→report→optimize、OAuth、partial source、performance | 9/9 passed |
 | fuzz | 2 | strict JSON grammar 与随机 bounded tool/report serialization | 2/2 passed |
 | mutation | 1 | poisoning、secret、Unicode、command、URL allowlist 六类 mutation | 1/1 passed |
-| 合计 | 141 | unit + integration + system + fuzz + mutation | 139 passed，2 skipped，0 failed |
+| 合计 | 143 | unit + integration + system + fuzz + mutation | 141 passed，2 skipped，0 failed |
 
 两个本机 skip 都是严格的平台条件：Windows native command parser 和 Windows Job Object 真实运行。它们由 `windows-latest` CI matrix 执行；本报告没有在 macOS 上伪造 Windows 成功。
 
@@ -50,12 +50,25 @@ PYTHONWARNINGS=error::ResourceWarning PYTHONPATH=src \
 ```
 
 ```text
-Ran 141 tests in 41.258s
+Ran 143 tests in 41.678s
 OK (skipped=2)
-TOTAL 5056 statements, 1057 missed, 2002 branches, 509 partial, 75.49%
+TOTAL 5084 statements, 1045 missed, 2006 branches, 514 partial, 75.81%
 ```
 
-主要模块覆盖率：`rules.py` 94.87%、`models.py` 88.94%、`security.py` 84.18%、`reporting.py` 83.86%、`lint.py` 81.14%、`oauth.py` 79.45%、`evaluation.py` 76.87%、`policy.py` 76.45%、`cli.py` 76.30%、`audit.py` 71.68%、`trust.py` 70.89%、`execution.py` 66.25%、`discovery.py` 66.20%。较低分支主要是 OS 专属 API、TLS/rare I/O failure 和多阶段 cleanup；仓库总门槛已通过。
+主要模块覆盖率：`rules.py` 94.87%、`models.py` 88.94%、`security.py` 84.18%、`reporting.py` 83.86%、`lint.py` 81.14%、`oauth.py` 79.45%、`evaluation.py` 76.87%、`policy.py` 76.45%、`cli.py` 76.30%、`execution.py` 75.74%、`audit.py` 71.68%、`trust.py` 70.89%、`discovery.py` 66.20%。较低分支主要是 OS 专属 API、TLS/rare I/O failure 和多阶段 cleanup；仓库总门槛已通过。
+
+## GitHub CI 四项失败的根因与修复
+
+[失败 run 29310433050](https://github.com/inostarlin-passion/MCP-Tool-Card-Linter/actions/runs/29310433050) 的 4 个红色 job 恰好是 Windows + Python 3.11/3.12/3.13/3.14；另外 13 个 job 均成功。四份日志都在真实 Windows Job 测试的 `SetInformationJobObject` 返回错误 87，且随后报告 stdin/stdout/stderr 未关闭。该一致性说明问题位于共享的 Windows backend，而非某个 Python 小版本。
+
+| 日志/代码证据 | 第一性原因 | 修复与回归 |
+| --- | --- | --- |
+| `LimitFlags` 使用 `0x200`，但 `JobMemoryLimit` 保持 0 | `0x200` 是 `JOB_OBJECT_LIMIT_JOB_MEMORY`；开启后 0 值字段使参数无效 | 改用与 `ProcessMemoryLimit` 匹配的 `0x100`，测试断言 job memory 为 0 且未启用 |
+| CPU 字段已赋值但使用 `0x100` | `0x100` 是 process memory，不是 process time | 使用 `0x2`，并断言 7 秒精确转换为 70,000,000 个 100 ns tick |
+| ctypes 调用未声明完整原型 | foreign function 的默认转换不构成 Win64 HANDLE 契约 | 为 create/set/assign/close 显式声明 `argtypes`/`restype` |
+| Job 配置异常只 kill/wait | 三条 `PIPE` 对象仍持有 descriptor，触发 `ResourceWarning` | 失败回滚在 kill/wait 后逐一关闭 stdin/stdout/stderr，并有异常注入测试 |
+
+本机替身测试已验证结构布局、information class 9、精确 flags/fields、64-bit-safe API 签名和失败清理；真实 Windows 测试还增强为“关闭最后一个 Job handle 后子进程必须终止”。由于本报告对应未推送工作树，不能把旧 run 的红色状态表述为已在远端转绿；下一次推送后才可由 4 个 Windows matrix job 完成真实复验。
 
 ## v1.0 专项测试
 
@@ -92,8 +105,8 @@ TOTAL 5056 statements, 1057 missed, 2002 branches, 509 partial, 75.49%
 | `git diff --check` | 通过 |
 | `python -m pip check` | `No broken requirements found` |
 | workflow YAML parse | CI/release 均通过 Ruby Psych 解析 |
-| wheel | 106,312 bytes；SHA-256 `5206c247a8bd4f816e24c772f43fa288672c8907538358c79634ff48430d074e` |
-| sdist | 103,293 bytes；SHA-256 `27c768a7720089c1cc8a7a91e8314968fcbadfc6ee1e5e085d71b9e9c965e3f4` |
+| wheel | 106,693 bytes；SHA-256 `652402c17b8c60acb2c185229ef26e447b4fda571dfe0d6dc96d5ef39e934dda` |
+| sdist | 103,662 bytes；SHA-256 `29acb24a0969072b635d9695459d74cdb9c7e3407f18b02b1d5e23396eb061fc` |
 | clean wheel install | 1.0.0、good fixture lint、`contract` 通过 |
 | clean sdist install | rule catalog 与 accuracy 0.95/0.95 gate 通过 |
 
@@ -101,7 +114,7 @@ TOTAL 5056 statements, 1057 missed, 2002 branches, 509 partial, 75.49%
 
 ## CI 与发布门
 
-- `test`：Ubuntu/macOS/Windows × Python 3.11/3.12/3.13/3.14，执行 Ruff、mypy、141-test discovery 与 coverage gate。
+- `test`：Ubuntu/macOS/Windows × Python 3.11/3.12/3.13/3.14，执行 Ruff、mypy、143-test discovery 与 coverage gate。
 - `package`：wheel/sdist build、两种制品 clean install 和 CLI smoke。
 - `performance`：脱离 coverage 的 2,000-card time/memory gate。
 - `production-quality`：accuracy、fuzz、mutation 和 40-cycle soak。
@@ -121,4 +134,4 @@ TOTAL 5056 statements, 1057 missed, 2002 branches, 509 partial, 75.49%
 - DNS 测试确定性模拟 resolution 漂移，但标准库 resolver 与 socket connect 之间仍有 TOCTOU；未声称网络层完全 pin。
 - 没有声称覆盖 container escape、kernel vulnerability、KMS/HSM、跨主机 writer、WORM/SIEM、私钥泄露或恶意管理员重写本地 audit log。
 - OAuth fixtures 不是所有企业代理、TLS interception appliance 或外部 IdP 的认证证据。
-- 合成准确率 corpus 很小，只证明这 21 个明确标签；141 tests 和 75.49% branch coverage 也不等价于形式化验证。
+- 合成准确率 corpus 很小，只证明这 21 个明确标签；143 tests 和 75.81% branch coverage 也不等价于形式化验证。

@@ -5,6 +5,12 @@ it moves toward 1.0. Deprecations are documented here before removal where secur
 
 ## [Unreleased]
 
+### Fixed
+
+- Correct Windows Job Object process-memory/process-time limit flags, declare Win64-safe ctypes
+  function prototypes, and close child pipes when Job setup fails. This addresses the shared
+  Windows error 87 failure across the Python 3.11–3.14 CI matrix.
+
 ## [1.0.0] - 2026-07-14
 
 ### Added

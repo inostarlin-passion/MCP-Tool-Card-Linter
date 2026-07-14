@@ -17,6 +17,14 @@ class ExecutionError(RuntimeError):
     """Raised when a requested execution boundary cannot be established."""
 
 
+_JOB_OBJECT_LIMIT_PROCESS_TIME = 0x00000002
+_JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x00000008
+_JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x00000100
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
+_WINDOWS_TICKS_PER_SECOND = 10_000_000
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionLimits:
     memory_mb: int = 512
@@ -301,8 +309,7 @@ class WindowsJobExecutor:
         try:
             job = _create_windows_job(process, self.limits)
         except BaseException:
-            process.kill()
-            process.wait(timeout=5)
+            _rollback_failed_spawn(process)
             raise
 
         def release() -> None:
@@ -340,8 +347,6 @@ def executor_from_options(
 def _create_windows_job(
     process: subprocess.Popen[bytes], limits: ExecutionLimits
 ) -> int:
-    from ctypes import wintypes
-
     class IO_COUNTERS(ctypes.Structure):
         _fields_ = [
             ("ReadOperationCount", ctypes.c_ulonglong),
@@ -356,13 +361,13 @@ def _create_windows_job(
         _fields_ = [
             ("PerProcessUserTimeLimit", ctypes.c_longlong),
             ("PerJobUserTimeLimit", ctypes.c_longlong),
-            ("LimitFlags", wintypes.DWORD),
+            ("LimitFlags", ctypes.c_uint32),
             ("MinimumWorkingSetSize", ctypes.c_size_t),
             ("MaximumWorkingSetSize", ctypes.c_size_t),
-            ("ActiveProcessLimit", wintypes.DWORD),
+            ("ActiveProcessLimit", ctypes.c_uint32),
             ("Affinity", ctypes.c_size_t),
-            ("PriorityClass", wintypes.DWORD),
-            ("SchedulingClass", wintypes.DWORD),
+            ("PriorityClass", ctypes.c_uint32),
+            ("SchedulingClass", ctypes.c_uint32),
         ]
 
     class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
@@ -376,7 +381,6 @@ def _create_windows_job(
         ]
 
     kernel32 = _windows_kernel32()
-    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
     job = kernel32.CreateJobObjectW(None, None)
     if not job:
         raise ExecutionError(
@@ -384,16 +388,21 @@ def _create_windows_job(
         )
     information = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
     information.BasicLimitInformation.LimitFlags = (
-        0x00002000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        | 0x00000008  # JOB_OBJECT_LIMIT_ACTIVE_PROCESS
-        | 0x00000200  # JOB_OBJECT_LIMIT_PROCESS_MEMORY
-        | 0x00000100  # JOB_OBJECT_LIMIT_PROCESS_TIME
+        _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        | _JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+        | _JOB_OBJECT_LIMIT_PROCESS_MEMORY
+        | _JOB_OBJECT_LIMIT_PROCESS_TIME
     )
     information.BasicLimitInformation.ActiveProcessLimit = limits.process_count
-    information.BasicLimitInformation.PerProcessUserTimeLimit = limits.cpu_seconds * 10_000_000
+    information.BasicLimitInformation.PerProcessUserTimeLimit = (
+        limits.cpu_seconds * _WINDOWS_TICKS_PER_SECOND
+    )
     information.ProcessMemoryLimit = limits.memory_mb * 1024 * 1024
     if not kernel32.SetInformationJobObject(
-        job, 9, ctypes.byref(information), ctypes.sizeof(information)
+        job,
+        _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+        ctypes.byref(information),
+        ctypes.sizeof(information),
     ):
         error = _windows_error()
         kernel32.CloseHandle(job)
@@ -411,10 +420,46 @@ def _running_on_linux() -> bool:
 
 
 def _windows_kernel32() -> Any:
+    from ctypes import wintypes
+
     loader = getattr(ctypes, "WinDLL", None)
     if loader is None:
         raise ExecutionError("Windows kernel APIs are unavailable on this platform")
-    return loader("kernel32", use_last_error=True)
+    kernel32 = loader("kernel32", use_last_error=True)
+    # Explicit prototypes prevent 64-bit HANDLE values from being implicitly
+    # narrowed to c_int by ctypes.
+    kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.SetInformationJobObject.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    return kernel32
+
+
+def _rollback_failed_spawn(process: subprocess.Popen[bytes]) -> None:
+    """Best-effort rollback that never masks the executor setup failure."""
+    try:
+        process.kill()
+    except OSError:
+        pass
+    try:
+        process.wait(timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    for stream in (process.stdin, process.stdout, process.stderr):
+        try:
+            if stream is not None and not stream.closed:
+                stream.close()
+        except OSError:
+            pass
 
 
 def _windows_error() -> int:
