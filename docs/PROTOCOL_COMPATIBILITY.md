@@ -1,6 +1,6 @@
 # MCP protocol compatibility
 
-Review date: 2026-07-14. Version: 0.5.0. The matrix describes tested tool-discovery
+Review date: 2026-07-14. Version: 1.0.0. The matrix describes tested tool-discovery
 claims, not a claim that this focused linter is a general-purpose MCP SDK.
 The columns focus on the current and immediately previous release. The allowlist also accepts
 2025-03-26 for base lifecycle/transport compatibility; the official `sse-retry` fixture negotiates
@@ -27,13 +27,16 @@ that version and passes, but fields introduced in later versions are not project
 | Official MCP conformance runner | `initialize` + `sse-retry` passed locally | Adapter accepts negotiated previous/legacy versions | Integrity-locked `@modelcontextprotocol/conformance@0.1.15`; 2/2 scenarios and 4/4 normative checks; CI gate configured |
 | Tasks | Not implemented | Not applicable | 2025-11-25 tasks are experimental and outside tool-card scan scope |
 
-The official MCP lifecycle requires version negotiation and capability-aware operation; the
+As of the review date, the official versioning page identifies 2025-11-25 as the current MCP
+protocol version; 2025-06-18 is the immediately preceding final version. Drafts, release candidates
+and future versions are intentionally outside the production compatibility claim until they become
+final and pass this repository's conformance gates. The official MCP lifecycle requires version negotiation and capability-aware operation; the
 transport specification additionally requires stdout purity for stdio and defines JSON/SSE POST,
-optional GET listeners, session headers, resumability and event IDs for Streamable HTTP. v0.5 tests
+optional GET listeners, session headers, resumability and event IDs for Streamable HTTP. v1.0 tests
 these bounded discovery paths and the official initialization vector. It does not declare client
 capabilities for sampling, roots or elicitation, so server-to-client requests for those features are
 outside the negotiated behavior rather than silently accepted.
 
-OAuth v0.5 intentionally supports pre-registered public clients. Dynamic Client Registration,
+OAuth v1.0 intentionally supports pre-registered public clients. Dynamic Client Registration,
 Client ID Metadata Documents, refresh-token rotation, browser automation and automatic
 insufficient-scope step-up are separate lifecycle features and are not claimed here.

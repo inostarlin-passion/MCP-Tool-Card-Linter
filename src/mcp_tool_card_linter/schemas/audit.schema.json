@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/inostarlin-passion/MCP-Tool-Card-Linter/v1.0.0/src/mcp_tool_card_linter/schemas/audit.schema.json",
+  "title": "MCP Tool Card Linter Operational Audit Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "sequence",
+    "recorded_at",
+    "event",
+    "actor",
+    "outcome",
+    "details",
+    "previous_hash",
+    "record_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "sequence": {"type": "integer", "minimum": 1, "maximum": 200000},
+    "recorded_at": {"type": "string", "format": "date-time", "maxLength": 128},
+    "event": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$"},
+    "actor": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$"},
+    "outcome": {"enum": ["success", "findings", "error", "interrupted"]},
+    "details": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 128,
+      "properties": {
+        "authenticated": {"type": "boolean"},
+        "custom_ca_configured": {"type": "boolean"},
+        "error_type": {"type": "string", "maxLength": 2048},
+        "insecure_http_allowed": {"type": "boolean"},
+        "mtls_configured": {"type": "boolean"},
+        "private_network_allowed": {"type": "boolean"},
+        "proxy_configured": {"type": "boolean"},
+        "scan_id": {"type": "string", "maxLength": 2048},
+        "source_count": {"type": "integer", "minimum": 0},
+        "source_errors": {"type": "integer", "minimum": 0},
+        "tool_version": {"type": "string", "maxLength": 2048},
+        "tools_scanned": {"type": "integer", "minimum": 0}
+      }
+    },
+    "previous_hash": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      ]
+    },
+    "record_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}

@@ -2,8 +2,9 @@
 
 ## Supported versions
 
-Security fixes are provided for the latest released minor version. Pre-1.0 releases may contain
-breaking security hardening; changes are documented in `CHANGELOG.md`.
+Security fixes are provided for the latest v1 minor release. Published report schemas, rule IDs and
+CLI exit meanings follow `docs/STABILITY_POLICY.md`. Security hardening may tighten a default when
+preserving it would expose credentials, execute code or bypass trust; such changes are documented.
 
 ## Private vulnerability reporting
 
@@ -23,3 +24,5 @@ behavior matches a tool card. Config command execution remains host code executi
 CLI confirmation flag is present; run untrusted servers only in an external OS/container sandbox.
 DNS validation is also subject to resolution/connect TOCTOU, so high-assurance deployments need an
 egress proxy or network policy. See `docs/THREAT_MODEL.md` for the complete boundary.
+The local operational audit hash chain is tamper-evident, not administrator-authenticated or
+deletion-resistant; export it to restricted WORM/centralized storage where those properties matter.

@@ -27,8 +27,10 @@ jobs:
           PACKAGE_VERSION="$(python -c 'import sys; sys.path.insert(0,"src"); import mcp_tool_card_linter; print(mcp_tool_card_linter.__version__)')"
           test "v${PACKAGE_VERSION}" = "${GITHUB_REF_NAME}"
       - name: Build wheel and sdist
+        shell: bash
         run: |
           python -m pip install --disable-pip-version-check build cyclonedx-bom==7.3.0
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
           python -m build --outdir dist-packages
           python -m venv product-venv
           product-venv/bin/python -m pip install --disable-pip-version-check dist-packages/*.whl
@@ -41,10 +43,15 @@ jobs:
             --output-format JSON --output-file release/sbom.cdx.json
           cd dist-packages
           sha256sum * > ../release/SHA256SUMS
-      - name: Attest package provenance
-        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
+      - name: Sign and attest package provenance
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:
           subject-path: dist-packages/*
+      - name: Bind the CycloneDX SBOM to release artifacts
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: dist-packages/*
+          sbom-path: release/sbom.cdx.json
       - name: Upload release bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -71,6 +78,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
         with:
           packages-dir: dist-packages/
+          attestations: true
 
   github-release:
     needs: publish
@@ -85,8 +93,10 @@ jobs:
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release create "${GITHUB_REF_NAME}"
-          dist-packages/* release/*
-          --repo "${GITHUB_REPOSITORY}"
-          --verify-tag --generate-notes
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            dist-packages/* release/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --verify-tag --generate-notes --draft
+          gh release edit "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" --draft=false

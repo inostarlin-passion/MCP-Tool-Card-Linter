@@ -1,9 +1,9 @@
 # MCP Tool Card Linter Report
 
 - Report schema: `1.1.0`
-- Scan ID: `urn:sha256:7c8220e1cf61e25d61bb45dea445ca65f95eefa0138ad29e1c34e5ca5e5d90ad`
+- Scan ID: `urn:sha256:07b3046427d61aa58f88edc08aac38f3d5282917d0bc58b3ccfb66f9c7679a53`
 - Generated: `1970-01-01T00:00:00+00:00`
-- Linter version: `0.5.0`
+- Linter version: `1.0.0`
 - Policy profile: `production`
 - Sources scanned: `1`
 - Tools scanned: `2`

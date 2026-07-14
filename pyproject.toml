@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=77,<84"]
-build-backend = "setuptools.build_meta"
+requires = ["setuptools>=77,<84", "setuptools-reproducible==0.1"]
+build-backend = "setuptools_reproducible"
 
 [project]
 name = "mcp-tool-card-linter"
@@ -12,7 +12,7 @@ license = "MIT"
 authors = [{ name = "inostarlin-passion" }]
 keywords = ["mcp", "model-context-protocol", "linter", "ai-agents", "security"]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 5 - Production/Stable",
   "Environment :: Console",
   "Intended Audience :: Developers",
   "Programming Language :: Python :: 3",

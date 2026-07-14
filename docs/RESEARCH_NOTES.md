@@ -16,6 +16,7 @@
 8. 针对 v0.4 一致性增量复核 MCP Streamable HTTP 的空 `data` 预热事件、SSE `id`/`retry`、GET + `Last-Event-ID` 恢复和 `tools/list_changed`；再沿 MCP Authorization 跳转 RFC 9728、RFC 8414/OIDC discovery、RFC 7636、RFC 8707，并实际执行官方 conformance runner 0.1.15 的 2025-11-25 `initialize` 场景。
 9. 针对 GitHub Actions run `29263797177` 做“check→job→失败 step→原始日志”多跳定位；再以 Python raw/buffered I/O、`tracemalloc`、coverage.py 和 mypy 的官方文档复核短读、插桩开销与平台 typeshed 行为，避免用放宽 timeout 掩盖实现问题。
 10. 针对 v0.5 沿 MCP local-server/SSRF 指南继续跳转 Docker 官方运行时限制、Bubblewrap 官方实现、Microsoft Job Object、RFC 8785、RFC 8032、pyca/cryptography 与 Sigstore bundle/identity verification 文档；再用 OWASP SSRF 指南交叉检查 IPv4/IPv6、metadata 地址和 DNS rebinding 边界。
+11. 针对 v1.0 继续做多跳核验：MCP versioning→current/previous final 生命周期；NIST/OWASP 静态分析评估→precision/recall 与 synthetic prevalence 限制；SOURCE_DATE_EPOCH→Python build backend→两次 wheel/sdist 字节比较；GitHub/Sigstore artifact attestation→PyPI PEP 740；OWASP/NIST logging→最小字段、secret 排除、tamper detection 与 WORM；RFC 9700→PKCE/issuer/resource/audience。
 
 优先级为：正式规范/RFC/标准库官方文档 > OWASP/CWE > 论文原文 > 开源实现说明。论文为预印本或经验研究时，不把其结论表述为协议保证。
 
@@ -126,6 +127,27 @@
 35. OWASP SSRF 指南要求同时处理 IPv4/IPv6 的 private、localhost、link-local 等非公网范围，并指出 cloud metadata 是常见凭据窃取目标。应用层重复 DNS 校验不能替代网络层 allowlist/egress control。
     来源：[OWASP SSRF Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html)
 
+36. MCP 官方 versioning 页面在本次复核日将 2025-11-25 标为 current；按正式版本序列，v1.0 的“当前+前一正式版本”是 2025-11-25/2025-06-18。尚未成为正式版本且未通过本项目 conformance gate 的 draft/RC 不属于生产兼容承诺。
+    来源：[MCP Versioning](https://modelcontextprotocol.io/docs/learn/versioning)
+
+37. NIST 的静态分析评估把 precision 定义为 TP/(TP+FP)、recall 定义为 TP/(TP+FN)，并强调测试用例需要 ground truth、相关性与统计意义；NIST 还指出 synthetic corpus 的 flaw prevalence 与生产软件不同，precision 不能直接外推。公开评估因此必须同时发布 corpus、标签范围、混淆矩阵和局限，而不能只给单一“准确率”。
+    来源：[NIST Evaluating Bug Finders](https://www.nist.gov/publications/evaluating-bug-finders-test-and-measurement-static-code-analyzers)、[NIST SATE IV](https://www.nist.gov/itl/ssd/software-quality-group/static-analysis-tool-exposition-sate-iv)、[OWASP Benchmark](https://owasp.org/www-project-benchmark/)
+
+38. `SOURCE_DATE_EPOCH` 是分发无关的可复现时间输入；Python build 官方说明完整复现还依赖固定 backend、Python 与平台。Setuptools wheel 能消费该变量，但普通 sdist gzip/tar 元数据仍可能不一致；`setuptools-reproducible` 对 tar uid/gid/mode/mtime 与 gzip header 做归一化。实际验收必须比较两个独立输出的完整字节，而不只是文件列表。
+    来源：[SOURCE_DATE_EPOCH specification](https://reproducible-builds.org/specs/source-date-epoch/)、[Python build reproducibility](https://build.pypa.io/en/latest/explanation/how-it-works.html)、[setuptools-reproducible](https://pypi.org/project/setuptools-reproducible/0.1/)
+
+39. GitHub artifact attestation 是由 OIDC 身份签署并绑定 repository、commit、workflow 与 artifact digest 的 provenance；公开仓库记录进入透明日志，但官方明确说明 attestation 不是“artifact 安全”的证明。Immutable Release 还锁定 tag/assets 并产生 release attestation，但必须在仓库设置中启用。
+    来源：[GitHub Artifact Attestations](https://docs.github.com/en/actions/concepts/security/artifact-attestations)、[GitHub Immutable Releases](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases)
+
+40. PyPI PEP 740 attestations 将每个 distribution digest 绑定到 Trusted Publisher 身份；官方 PyPI Action 默认生成并上传 publish attestation。其安全模型只回答“来自哪个身份且未在发布后修改”，不回答该身份或代码是否值得信任。
+    来源：[PyPI Attestations](https://docs.pypi.org/attestations/)、[Producing Attestations](https://docs.pypi.org/attestations/producing-attestations/)、[Attestation Security Model](https://docs.pypi.org/attestations/security-model/)
+
+41. OWASP logging 指南要求事件记录 when/where/who/what，排除 access token、password、key 等 secret，并在静态存储中提供 tamper detection、受限读取和尽快复制到只读介质。单个本地 hash chain 能发现未重算的修改，但不能阻止有写权限的管理员重算、截断或删除，因此生产还需集中/WORM 存储。
+    来源：[OWASP Logging Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html)、[NIST Log Management](https://csrc.nist.gov/projects/log-management)
+
+42. RFC 9700 要求 public client 使用 PKCE，S256 是当前不在 authorization request 暴露 verifier 的方法；多 authorization server client 需要 issuer mix-up 防护，access token 应做 resource/audience 与权限限制。这与 v1 保留 exact redirect/state/issuer、S256 和 RFC 8707 resource binding 一致。
+    来源：[RFC 9700](https://www.rfc-editor.org/rfc/rfc9700.html)、[RFC 8707](https://www.rfc-editor.org/rfc/rfc8707.html)
+
 ## 从事实到实现的推理链
 
 | 事实/威胁 | 第一性原理 | 本项目措施 |
@@ -150,6 +172,10 @@
 | OAuth code/token 可被截获、替换或错发 audience | 授权必须把发起者、回调、issuer 和 resource 绑定到同一事务 | S256 PKCE、随机 state、可选 `iss` 校验、exact redirect、双请求 `resource`、0600 有期限 state、O_EXCL completion lock、token 不进 argv/URL/output |
 | raw pipe 可短读 | 消息边界必须由换行/EOF/字节上限决定，不能由单次 OS read 返回长度决定 | stdio stdout/stderr 使用 buffered pipe；JSON-RPC 仍限 4 MiB，队列仍限 8 条；超限立即受控失败 |
 | 观测工具会改变被观测系统 | 性能门限必须定义测量环境，否则就是测量 tracer 开销 | coverage 套件只验证 2,000-card 功能；独立无 coverage job 先测时间、再用 `tracemalloc` 单独测峰值内存 |
+| 稳定接口会被下游自动化绑定 | “不打算变化”不可验证，必须把契约变成数据和测试 | `contract` 输出 schema/rule/exit/protocol；规则集合 SHA-256 冻结；1.0/1.1 reader 集成测试；未知 rule 不再生成 metadata |
+| 启发式必须用 ground truth 评价 | 没有显式正负标签就无法计算 FP/FN | 公共 JSONL corpus；只统计明确 labelled pairs；输出 TP/FP/TN/FN、per-rule、digest、precision/recall/F1 和外推限制 |
+| 构建签名与可复现解决不同问题 | 签名绑定 identity，复现绑定 source→artifact；二者都不证明 benign | 同环境两次 wheel/sdist byte compare；SHA-256/SBOM；GitHub/Sigstore provenance；PyPI PEP 740；验证文档明确边界 |
+| 审计日志本身可能泄密或被篡改 | 可归责性不能以复制 secret 为代价，local chain 也不是 WORM | lint/OAuth 只允许固定非敏感字段；actor/time/sequence/hash chain/lock/append/fsync/0600；要求外送 WORM/SIEM |
 
 ## 推断
 
@@ -158,13 +184,16 @@
 3. 签名回答“持有该 private key 的主体批准了什么”，但 key 与真实 publisher 的对应关系仍来自带外信任；因此 verifier 必须同时配置预期 key 和 publisher/server claim。
 4. 对 config command 采用显式授权会带来一次额外 CLI flag，但它避免把看似只读的扫描动作变成静默 RCE，安全收益明显高于兼容成本。
 5. description 质量和长度存在可靠性/成本权衡，因此本项目报告缺失边界与过长文本，而不自动扩写或声称越长越好。
+6. v1 稳定性首先是“可验证不破坏下游”的承诺，因此 report schema 保持 1.1.0，而不是为了产品版本对齐无意义地改成 2.0.0。
 
 ## 不确定与剩余边界
 
 1. 规则是可解释的启发式，可能有 false positive/false negative；尤其无法静态证明 server implementation 与 card 一致。
 2. 标准库 DNS 解析无法无竞态地把已验证 IP 直接固定到后续 TLS socket；高保证部署仍需 egress proxy/network policy。地址集 pin 能检测变化，但不宣称消除所有 DNS TOCTOU。
-3. Streamable HTTP v0.5 覆盖 discovery 所需的 initialize、notification、分页 tools/list、JSON/SSE、GET listener/resumption、list_changed 和 session cleanup；它不是通用 SDK，未声明或实现 sampling、roots、elicitation、experimental tasks 及全部 draft 行为。
+3. Streamable HTTP v1.0 覆盖 discovery 所需的 initialize、notification、分页 tools/list、JSON/SSE、GET listener/resumption、list_changed 和 session cleanup；它不是通用 SDK，未声明或实现 sampling、roots、elicitation、experimental tasks 及全部 draft 行为。
 4. Docker/Bubblewrap 的隔离强度依赖 runtime/kernel policy；Windows Job Object 只约束进程树和资源，不提供网络/文件系统 sandbox；显式 host backend 不隔离。
 5. Ed25519 baseline 不能证明首次审批正确，也不能抵御 private key 被盗、public key 被替换或 approval log 被有权访问文件系统的攻击者整体截断；需要独立 key 分发与 WORM/透明日志。
 6. 本项目只扫描 tool card，不扫描 MCP prompts/resources、server source code、依赖漏洞、runtime tool output 或多步 toxic flow；应与 sandbox、SAST/SCA、runtime policy、audit 和人工复核组合。
-7. OAuth v0.5 仍是预注册 public-client 流程；不自动启动浏览器、不实现 DCR/Client ID Metadata Document、refresh-token rotation 或 runtime insufficient-scope step-up。token audience 最终仍必须由 authorization/resource server 验证。
+7. OAuth v1.0 仍是预注册 public-client 流程；不自动启动浏览器、不实现 DCR/Client ID Metadata Document、refresh-token rotation 或 runtime insufficient-scope step-up。token audience 最终仍必须由 authorization/resource server 验证。
+8. 公开准确率 corpus 只有 12 个 synthetic cases、21 个 labelled pairs 和 8 个被计分规则；1.0 precision/recall 不能外推到未标注规则、真实语言分布或 runtime behavior。
+9. operational audit hash chain 未签名，本地管理员可重算或删除；它只提供本地 tamper evidence 和 cooperating-writer serialization，组织级不可抵赖/留存依赖 authenticated central collector/WORM。

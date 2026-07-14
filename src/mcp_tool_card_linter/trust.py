@@ -138,7 +138,7 @@ def create_baseline_bundle(
     return {
         "$schema": (
             "https://raw.githubusercontent.com/inostarlin-passion/"
-            "MCP-Tool-Card-Linter/v0.5.0/src/mcp_tool_card_linter/"
+            "MCP-Tool-Card-Linter/v1.0.0/src/mcp_tool_card_linter/"
             "schemas/baseline.schema.json"
         ),
         "schema_version": BASELINE_SCHEMA_VERSION,

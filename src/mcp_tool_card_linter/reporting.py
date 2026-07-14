@@ -8,9 +8,21 @@ import re
 import stat
 import tempfile
 import xml.etree.ElementTree as ET
+from functools import lru_cache
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
+from jsonschema import Draft202012Validator, FormatChecker
+from jsonschema.exceptions import ValidationError
+
+from .contracts import (
+    CURRENT_REPORT_SCHEMA_VERSION,
+    EXIT_FINDINGS,
+    EXIT_OPERATIONAL_ERROR,
+    EXIT_SUCCESS,
+    SUPPORTED_REPORT_SCHEMA_VERSIONS,
+)
 from .models import BaselineEntry, MAX_LINT_TOOLS, LintReport, SEVERITY_ORDER
 from .rules import rule_metadata
 from .security import safe_log_text
@@ -386,17 +398,77 @@ def report_to_github_annotations(report: LintReport) -> str:
 
 def exit_code_for_report(report: LintReport, fail_on: str) -> int:
     if report.summary.get("source_errors", 0) > 0:
-        return 2
+        return EXIT_OPERATIONAL_ERROR
     if fail_on == "never":
-        return 0
+        return EXIT_SUCCESS
     if fail_on not in SEVERITY_ORDER:
         raise ReportError(f"Unknown fail-on severity: {safe_log_text(fail_on)}")
     threshold = SEVERITY_ORDER[fail_on]  # mypy narrows after the membership check.
     for tool in report.tools:
         for issue in tool.issues:
             if SEVERITY_ORDER[issue.severity] >= threshold:
-                return 1
-    return 0
+                return EXIT_FINDINGS
+    return EXIT_SUCCESS
+
+
+def validate_report_payload(report_payload: Any) -> dict[str, Any]:
+    """Validate current reports and the v1-supported legacy report contract."""
+    _validate_report_root(report_payload)
+    schema_version = report_payload.get("report_schema_version")
+    if schema_version is None:
+        raise ReportError("Report report_schema_version is required")
+    if schema_version == CURRENT_REPORT_SCHEMA_VERSION:
+        try:
+            _current_report_validator().validate(report_payload)
+        except ValidationError as exc:
+            path = "/" + "/".join(str(part) for part in exc.absolute_path)
+            raise ReportError(
+                f"Report does not satisfy schema {CURRENT_REPORT_SCHEMA_VERSION} at "
+                f"{safe_log_text(path or '/')}: {safe_log_text(exc.message)}"
+            ) from exc
+    else:
+        # v1.0 keeps the 1.0.0 reader path for migration. Validate the stable
+        # identities/fingerprints and every field consumed by optimization.
+        required = {
+            "$schema",
+            "report_schema_version",
+            "rule_catalog_version",
+            "scan_id",
+            "generated_at",
+            "tool_version",
+            "version",
+            "policy",
+            "protocol",
+            "sources",
+            "summary",
+            "tools",
+            "facts",
+            "inferences",
+            "uncertainties",
+        }
+        missing = required - set(report_payload)
+        if missing:
+            raise ReportError(
+                "Legacy report is missing required fields: " + ", ".join(sorted(missing))
+            )
+        baseline_fingerprints_from_payload(report_payload)
+        optimize_from_report(report_payload)
+    return {
+        "valid": True,
+        "report_schema_version": schema_version,
+        "tools": len(report_payload["tools"]),
+        "scan_id": report_payload.get("scan_id"),
+    }
+
+
+@lru_cache(maxsize=1)
+def _current_report_validator() -> Draft202012Validator:
+    schema = json.loads(
+        files("mcp_tool_card_linter.schemas")
+        .joinpath("report.schema.json")
+        .read_text(encoding="utf-8")
+    )
+    return Draft202012Validator(schema, format_checker=FormatChecker())
 
 
 def optimize_from_report(report_payload: dict[str, Any]) -> dict[str, Any]:
@@ -636,7 +708,7 @@ def _validate_report_root(report_payload: Any) -> None:
     if len(tools) > MAX_LINT_TOOLS:
         raise ReportError(f"Report has more than {MAX_LINT_TOOLS} tools")
     schema_version = report_payload.get("report_schema_version")
-    if schema_version is not None and schema_version not in {"1.0.0", "1.1.0"}:
+    if schema_version is not None and schema_version not in SUPPORTED_REPORT_SCHEMA_VERSIONS:
         raise ReportError(
             f"Unsupported report schema version: {safe_log_text(schema_version)}"
         )

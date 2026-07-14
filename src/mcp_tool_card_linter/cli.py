@@ -8,9 +8,17 @@ from pathlib import Path
 from typing import Sequence
 
 from . import __version__
+from .audit import AuditError, append_audit_event, verify_audit_log
 from .auth import BearerTokenProvider, CredentialProvider
-from .discovery import (
+from .contracts import (
+    EXIT_INTERRUPTED,
+    EXIT_FINDINGS,
+    EXIT_OPERATIONAL_ERROR,
+    EXIT_SUCCESS,
     SUPPORTED_MCP_PROTOCOL_VERSIONS,
+    public_contract,
+)
+from .discovery import (
     DiscoveryError,
     discover_from_config,
     discover_from_server_url,
@@ -23,6 +31,7 @@ from .execution import (
     ProcessExecutor,
     executor_from_options,
 )
+from .evaluation import EvaluationError, evaluate_rule_corpus
 from .lint import lint_sources
 from .models import BaselineAssessment, LintConfig, SourceResult
 from .oauth import (
@@ -42,6 +51,7 @@ from .reporting import (
     report_to_junit,
     report_to_markdown,
     report_to_sarif,
+    validate_report_payload,
     report_to_github_annotations,
     write_jsonl_report,
     write_json_report,
@@ -86,31 +96,45 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_authorize(args)
         if args.command == "baseline":
             return _run_baseline(args)
+        if args.command == "evaluate":
+            return _run_evaluate(args)
+        if args.command == "contract":
+            return _run_contract()
+        if args.command == "validate-report":
+            return _run_validate_report(args)
+        if args.command == "audit":
+            return _run_audit(args)
         parser.print_help(sys.stderr)
-        return 2
+        return EXIT_OPERATIONAL_ERROR
     except (
+        AuditError,
         DiscoveryError,
+        EvaluationError,
         ExecutionError,
         ReportError,
         InputValidationError,
         TrustError,
     ) as exc:
+        _record_failure_audit(args, exc)
         print(f"error: {safe_log_text(exc)}", file=sys.stderr)
-        return 2
+        return EXIT_OPERATIONAL_ERROR
     except OSError as exc:
+        _record_failure_audit(args, exc)
         print(f"io error: {safe_log_text(exc)}", file=sys.stderr)
-        return 2
+        return EXIT_OPERATIONAL_ERROR
     except KeyboardInterrupt:
+        _record_failure_audit(args, KeyboardInterrupt(), outcome="interrupted")
         print("interrupted", file=sys.stderr)
-        return 130
+        return EXIT_INTERRUPTED
     except Exception as exc:
         if getattr(args, "debug", False):
             raise
+        _record_failure_audit(args, exc)
         print(
             f"internal error: {safe_log_text(exc)} (rerun with --debug for a traceback)",
             file=sys.stderr,
         )
-        return 2
+        return EXIT_OPERATIONAL_ERROR
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -256,6 +280,7 @@ def build_parser() -> argparse.ArgumentParser:
     lint_parser.add_argument("--client-cert", help="PEM client certificate chain for mTLS")
     lint_parser.add_argument("--client-key", help="PEM private key for mTLS")
     lint_parser.add_argument("--policy", help="Bounded TOML rule policy or pyproject.toml")
+    _add_audit_options(lint_parser)
     lint_parser.add_argument("--profile", choices=sorted(PROFILES), help="Override policy profile")
     lint_parser.add_argument(
         "--select",
@@ -360,6 +385,7 @@ def build_parser() -> argparse.ArgumentParser:
         authorize_action.add_argument("--client-cert", help="PEM client certificate chain")
         authorize_action.add_argument("--client-key", help="PEM private key for mTLS")
         authorize_action.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
+        _add_audit_options(authorize_action)
 
     baseline_parser = subparsers.add_parser(
         "baseline",
@@ -395,11 +421,41 @@ def build_parser() -> argparse.ArgumentParser:
     baseline_verify.add_argument("--public-key", required=True)
     baseline_verify.add_argument("--approval-log")
     baseline_verify.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
+
+    evaluate_parser = subparsers.add_parser(
+        "evaluate", help="Measure rule precision/recall on an explicitly labelled JSONL corpus"
+    )
+    evaluate_parser.add_argument("--corpus", required=True)
+    evaluate_parser.add_argument(
+        "--min-precision", type=_bounded_rate, default=0.0
+    )
+    evaluate_parser.add_argument("--min-recall", type=_bounded_rate, default=0.0)
+    evaluate_parser.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
+
+    contract_parser = subparsers.add_parser(
+        "contract", help="Print the stable v1 machine-interface contract"
+    )
+    contract_parser.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
+
+    validate_parser = subparsers.add_parser(
+        "validate-report", help="Validate a current or v1-supported legacy JSON report"
+    )
+    validate_parser.add_argument("--input", required=True)
+    validate_parser.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
+
+    audit_parser = subparsers.add_parser(
+        "audit", help="Verify the local tamper-evident operational audit chain"
+    )
+    audit_actions = audit_parser.add_subparsers(dest="audit_command", required=True)
+    audit_verify = audit_actions.add_parser("verify", help="Verify every audit record and link")
+    audit_verify.add_argument("--log", required=True)
+    audit_verify.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
 def _run_lint(args: argparse.Namespace) -> int:
     _validate_lint_paths(args)
+    _validate_audit_options(args)
     policy = load_policy(args.policy) if args.policy else PolicyConfig()
     policy = policy.with_cli_overrides(
         profile=args.profile,
@@ -495,6 +551,31 @@ def _run_lint(args: argparse.Namespace) -> int:
         print(report_to_github_annotations(report), end="")
     fail_on = args.fail_on or policy.fail_on or "error"
     exit_code = exit_code_for_report(report, fail_on)
+    if args.audit_log:
+        append_audit_event(
+            args.audit_log,
+            event="lint.completed",
+            actor=args.audit_actor,
+            outcome=(
+                "success"
+                if exit_code == EXIT_SUCCESS
+                else "findings"
+                if exit_code == EXIT_FINDINGS
+                else "error"
+            ),
+            details={
+                "scan_id": report.scan_id,
+                "tool_version": __version__,
+                "source_count": len(report.sources),
+                "tools_scanned": int(report.summary.get("tools_scanned", 0)),
+                "source_errors": int(report.summary.get("source_errors", 0)),
+                "authenticated": any(
+                    bool(source.get("metadata", {}).get("authenticated", False))
+                    for source in report.sources
+                    if isinstance(source.get("metadata"), dict)
+                ),
+            },
+        )
     if exit_code == 2:
         for source in report.sources:
             for error in source.get("errors", []):
@@ -618,6 +699,23 @@ def _run_explain(args: argparse.Namespace) -> int:
 
 
 def _run_authorize(args: argparse.Namespace) -> int:
+    _validate_audit_options(args)
+    if args.audit_log:
+        audit_path = _resolved_path(args.audit_log)
+        protected_paths = {
+            _resolved_path(value)
+            for value in (
+                args.state_file,
+                getattr(args, "token_file", None),
+                getattr(args, "callback_url_file", None),
+                args.ca_bundle,
+                args.client_cert,
+                args.client_key,
+            )
+            if value
+        }
+        if audit_path in protected_paths:
+            raise AuditError("Audit log must not overwrite OAuth input or state/token files")
     network = {
         "timeout": args.timeout,
         "allow_private_network": args.allow_private_network,
@@ -665,6 +763,21 @@ def _run_authorize(args: argparse.Namespace) -> int:
         )
     else:
         raise InputValidationError("Unknown authorize action")
+    if args.audit_log:
+        append_audit_event(
+            args.audit_log,
+            event=f"oauth.{args.authorize_command}",
+            actor=args.audit_actor,
+            outcome="success",
+            details={
+                "tool_version": __version__,
+                "private_network_allowed": bool(args.allow_private_network),
+                "insecure_http_allowed": bool(args.allow_insecure_http),
+                "proxy_configured": bool(args.proxy),
+                "custom_ca_configured": bool(args.ca_bundle),
+                "mtls_configured": bool(args.client_cert and args.client_key),
+            },
+        )
     print(
         json.dumps(
             result,
@@ -752,6 +865,44 @@ def _run_baseline(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_evaluate(args: argparse.Namespace) -> int:
+    result = evaluate_rule_corpus(
+        args.corpus,
+        min_precision=args.min_precision,
+        min_recall=args.min_recall,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False))
+    return EXIT_SUCCESS if result["passed"] else EXIT_FINDINGS
+
+
+def _run_contract() -> int:
+    print(
+        json.dumps(
+            public_contract(),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+    )
+    return EXIT_SUCCESS
+
+
+def _run_validate_report(args: argparse.Namespace) -> int:
+    payload = load_json_file(args.input)
+    result = validate_report_payload(payload)
+    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False))
+    return EXIT_SUCCESS
+
+
+def _run_audit(args: argparse.Namespace) -> int:
+    if args.audit_command != "verify":
+        raise AuditError("Unknown audit action")
+    result = verify_audit_log(args.log)
+    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False))
+    return EXIT_SUCCESS
+
+
 def _command_executor(args: argparse.Namespace) -> ProcessExecutor:
     limits = ExecutionLimits(
         memory_mb=args.executor_memory_mb,
@@ -805,6 +956,16 @@ def _bounded_cpu_count(value: str) -> float:
     return number
 
 
+def _bounded_rate(value: str) -> float:
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a number") from exc
+    if not math.isfinite(number) or not 0.0 <= number <= 1.0:
+        raise argparse.ArgumentTypeError("must be finite and in 0..1")
+    return number
+
+
 def _timeout_seconds(value: str) -> float:
     try:
         number = float(value)
@@ -834,11 +995,12 @@ def _validate_lint_paths(args: argparse.Namespace) -> None:
             args.sarif_report,
             args.junit_report,
             args.jsonl_report,
+            args.audit_log,
         )
         if value
     ]
     if len(outputs) != len(set(outputs)):
-        raise ReportError("JSON and Markdown reports must use different paths")
+        raise ReportError("Report and audit outputs must use different paths")
     inputs = [
         _resolved_path(value)
         for value in (
@@ -859,6 +1021,52 @@ def _validate_lint_paths(args: argparse.Namespace) -> None:
         raise ReportError(
             f"Report output must not overwrite an input file: {safe_log_text(next(iter(overlap)))}"
         )
+
+
+def _add_audit_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--audit-log",
+        help="Append a private, hash-chained operational event without credentials or raw cards",
+    )
+    parser.add_argument(
+        "--audit-actor",
+        help="Bounded operator/workload identity; required with --audit-log",
+    )
+
+
+def _validate_audit_options(args: argparse.Namespace) -> None:
+    audit_log = getattr(args, "audit_log", None)
+    audit_actor = getattr(args, "audit_actor", None)
+    if bool(audit_log) != bool(audit_actor):
+        raise AuditError("--audit-log and --audit-actor must be supplied together")
+
+
+def _record_failure_audit(
+    args: argparse.Namespace,
+    error: BaseException,
+    *,
+    outcome: str = "error",
+) -> None:
+    audit_log = getattr(args, "audit_log", None)
+    audit_actor = getattr(args, "audit_actor", None)
+    if not audit_log or not audit_actor or isinstance(error, AuditError):
+        return
+    command = safe_log_text(getattr(args, "command", "unknown"), limit=128)
+    nested = getattr(args, "authorize_command", None)
+    event = f"{command}.{safe_log_text(nested, limit=64)}.failed" if nested else f"{command}.failed"
+    try:
+        append_audit_event(
+            audit_log,
+            event=event,
+            actor=audit_actor,
+            outcome=outcome,
+            details={
+                "tool_version": __version__,
+                "error_type": type(error).__name__,
+            },
+        )
+    except AuditError as audit_error:
+        print(f"audit error: {safe_log_text(audit_error)}", file=sys.stderr)
 
 
 def _resolved_path(value: str) -> Path:

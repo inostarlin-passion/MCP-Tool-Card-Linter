@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 
 from . import __version__
 from .auth import CredentialProvider
+from .contracts import SUPPORTED_MCP_PROTOCOL_VERSIONS
 from .execution import ExecutionError, HostExecutor, ManagedProcess, ProcessExecutor
 from .models import MAX_LINT_TOOLS, SourceResult, ToolCard
 from .security import (
@@ -40,7 +41,6 @@ from .security import (
     strict_json_loads,
 )
 
-SUPPORTED_MCP_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
 MCP_PROTOCOL_VERSION = SUPPORTED_MCP_PROTOCOL_VERSIONS[0]
 MAX_STDERR_LINES = 100
 MAX_STDERR_LINE_BYTES = 4096

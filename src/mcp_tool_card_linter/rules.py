@@ -30,6 +30,9 @@ KNOWN_RULE_IDS = tuple(
             "ANNOTATION_CONFLICT_READ_ONLY",
             "ARRAY_BOUND_RECOMMENDED",
             "ARRAY_ITEMS_MISSING",
+            "BASELINE_SIGNATURE_MISSING",
+            "BASELINE_IDENTITY_CHANGED",
+            "BASELINE_PUBLISHER_CHANGED",
             "COMMAND_PARAMETER_UNCONSTRAINED",
             "CROSS_SERVER_TOOL_SHADOWING",
             "DESCRIPTION_REPEATS_NAME",
@@ -157,6 +160,8 @@ class RuleMetadata:
 
 
 def rule_metadata(rule_id: str, default_severity: str | None = None) -> RuleMetadata:
+    if rule_id not in KNOWN_RULE_IDS:
+        raise ValueError(f"Unknown stable rule ID: {rule_id}")
     category = _category(rule_id)
     references: tuple[str, ...]
     if category == "spec":
@@ -173,7 +178,13 @@ def rule_metadata(rule_id: str, default_severity: str | None = None) -> RuleMeta
         category=category,
         references=references,
         cwe=_cwe(rule_id),
-        introduced_in="0.3.0" if rule_id in _V03_RULES else "0.2.0",
+        introduced_in=(
+            "0.5.0"
+            if rule_id in _V05_RULES
+            else "0.3.0"
+            if rule_id in _V03_RULES
+            else "0.2.0"
+        ),
     )
 
 
@@ -199,7 +210,7 @@ def json_pointer(path: str) -> str:
 
 
 def _category(rule_id: str) -> str:
-    if rule_id.startswith("TOOL_CARD_"):
+    if rule_id.startswith(("TOOL_CARD_", "BASELINE_")):
         return "integrity"
     security_terms = (
         "POISONING",
@@ -264,6 +275,7 @@ _DEFAULT_SEVERITY = {
             "ANNOTATION_CONFLICT_DESTRUCTIVE_READ_ONLY",
             "ANNOTATION_CONFLICT_READ_ONLY",
             "ARRAY_ITEMS_MISSING",
+            "BASELINE_SIGNATURE_MISSING",
             "COMMAND_PARAMETER_UNCONSTRAINED",
             "DUPLICATE_TOOL_NAME",
             "EXTERNAL_SCHEMA_REF",
@@ -286,6 +298,8 @@ _DEFAULT_SEVERITY = {
     **{
         rule_id: "critical"
         for rule_id in {
+            "BASELINE_IDENTITY_CHANGED",
+            "BASELINE_PUBLISHER_CHANGED",
             "HARDCODED_SECRET_IN_METADATA",
             "INVALID_TOOL_NAME_TYPE",
             "INVALID_TOOL_OBJECT",
@@ -322,5 +336,13 @@ _V03_RULES = frozenset(
         "SCHEMA_META_VALIDATION_SKIPPED",
         "TOOL_NAME_SPEC_VIOLATION",
         "TOO_MANY_TOOL_ICONS",
+    }
+)
+
+_V05_RULES = frozenset(
+    {
+        "BASELINE_IDENTITY_CHANGED",
+        "BASELINE_PUBLISHER_CHANGED",
+        "BASELINE_SIGNATURE_MISSING",
     }
 )

@@ -5,6 +5,41 @@ it moves toward 1.0. Deprecations are documented here before removal where secur
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-07-14
+
+### Added
+
+- A machine-readable v1 compatibility contract for readable report schemas, stable rule IDs,
+  stable CLI exit meanings, and current/previous MCP protocol support.
+- `validate-report` with full 1.1.0 Schema validation and a retained 1.0.0 migration reader.
+- A bounded public JSONL accuracy evaluator and 12-case/21-labelled-pair v1 corpus with CI precision
+  and recall gates.
+- Deterministic parser/tool-card fuzzing, security input-mutation operators, repeated stdio process
+  lifecycle soak testing, and dedicated CI jobs.
+- Minimal allowlisted lint/OAuth operational audit records with owner-only append, fsync,
+  cooperating-writer lock, record hashes, previous-hash chain, and full-chain verification.
+- Stability, accuracy, release-verification, production-support-boundary, and expanded STRIDE/data-flow
+  threat-model documentation.
+
+### Changed
+
+- Package maturity is now Production/Stable and the version is 1.0.0; report output remains schema
+  1.1.0 to preserve the already published machine contract.
+- MCP version constants and CLI exit codes are centralized as public compatibility data.
+- Rule catalog now includes the previously emitted `BASELINE_SIGNATURE_MISSING` ID and rejects
+  unregistered IDs instead of silently manufacturing metadata.
+- The build backend is pinned to `setuptools-reproducible==0.1`; CI builds wheel and sdist twice with
+  the same source epoch and requires byte equality.
+
+### Security
+
+- Audit detail keys are a closed allowlist and exclude endpoint/card/token/code/path material.
+- Release workflow uses commit-SHA-pinned GitHub attestation actions, binds the CycloneDX SBOM to
+  artifacts, explicitly enables PyPI attestations, and publishes GitHub assets as a draft before
+  finalization for immutable-release compatibility.
+- Documentation distinguishes cryptographic provenance from code safety, a local hash chain from
+  authenticated/WORM logging, and synthetic accuracy from production prevalence.
+
 ## [0.5.0] - 2026-07-14
 
 ### Added
@@ -104,7 +139,8 @@ it moves toward 1.0. Deprecations are documented here before removal where secur
 - Environment proxy variables are not inherited implicitly; proxy routing requires `--proxy`.
 - Per-tool findings and SARIF results have explicit truncation limits and machine-readable markers.
 
-[Unreleased]: https://github.com/inostarlin-passion/MCP-Tool-Card-Linter/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/inostarlin-passion/MCP-Tool-Card-Linter/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/inostarlin-passion/MCP-Tool-Card-Linter/compare/v0.5.0...v1.0.0
 [0.5.0]: https://github.com/inostarlin-passion/MCP-Tool-Card-Linter/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/inostarlin-passion/MCP-Tool-Card-Linter/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/inostarlin-passion/MCP-Tool-Card-Linter/compare/v0.2.0...v0.3.0

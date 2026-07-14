@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/inostarlin-passion/MCP-Tool-Card-Linter/v0.5.0/src/mcp_tool_card_linter/schemas/report.schema.json",
+  "$schema": "https://raw.githubusercontent.com/inostarlin-passion/MCP-Tool-Card-Linter/v1.0.0/src/mcp_tool_card_linter/schemas/report.schema.json",
   "facts": [
     "MCP tools are model-callable capabilities described by metadata such as name, description, and input schema.",
     "MCP uses JSON-RPC messages over transports such as stdio and Streamable HTTP.",
@@ -24,7 +24,7 @@
   "protocol": [],
   "report_schema_version": "1.1.0",
   "rule_catalog_version": "1.0.0",
-  "scan_id": "urn:sha256:7c8220e1cf61e25d61bb45dea445ca65f95eefa0138ad29e1c34e5ca5e5d90ad",
+  "scan_id": "urn:sha256:07b3046427d61aa58f88edc08aac38f3d5282917d0bc58b3ccfb66f9c7679a53",
   "sources": [
     {
       "errors": [],
@@ -82,7 +82,7 @@
     "sources_scanned": 1,
     "tools_scanned": 2
   },
-  "tool_version": "0.5.0",
+  "tool_version": "1.0.0",
   "tools": [
     {
       "baseline_diff": {
@@ -556,5 +556,5 @@
     "Tool Card is an engineering term in this project, not a formal MCP specification object.",
     "A static linter cannot verify whether server implementation behavior matches its metadata."
   ],
-  "version": "0.5.0"
+  "version": "1.0.0"
 }
