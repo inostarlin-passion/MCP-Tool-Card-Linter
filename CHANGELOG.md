@@ -1,17 +1,11 @@
 # Changelog
 
-This project follows semantic versioning for its CLI, rule IDs, and versioned report contract while
-it moves toward 1.0. Deprecations are documented here before removal where security permits.
+This project follows semantic versioning for its CLI, rule IDs, and versioned report contract.
+Deprecations are documented here before removal where security permits.
 
 ## [Unreleased]
 
-### Fixed
-
-- Correct Windows Job Object process-memory/process-time limit flags, declare Win64-safe ctypes
-  function prototypes, and close child pipes when Job setup fails. This addresses the shared
-  Windows error 87 failure across the Python 3.11–3.14 CI matrix.
-
-## [1.0.0] - 2026-07-14
+## [1.0.0] - 2026-07-15
 
 ### Added
 
@@ -45,6 +39,12 @@ it moves toward 1.0. Deprecations are documented here before removal where secur
   finalization for immutable-release compatibility.
 - Documentation distinguishes cryptographic provenance from code safety, a local hash chain from
   authenticated/WORM logging, and synthetic accuracy from production prevalence.
+
+### Fixed
+
+- Correct Windows Job Object process-memory/process-time limit flags, declare Win64-safe ctypes
+  function prototypes, and close child pipes when Job setup fails. This addresses the shared
+  Windows error 87 failure across the Python 3.11–3.14 CI matrix.
 
 ## [0.5.0] - 2026-07-14
 

@@ -17,12 +17,20 @@ In this project, a "Tool Card" is an engineering concept: a reviewable bundle of
 
 ## Quick Start
 
+Install the CLI in an isolated environment:
+
 ```bash
-python3 -m pip install -e .
-mcp-toolsmith lint --tools-file examples/bad-tools.json
+pipx install mcp-tool-card-linter
+mcp-toolsmith lint --tools-file path/to/tools.json
 ```
 
-Run without installing the package:
+Alternatively, install it into an existing Python environment:
+
+```bash
+python3 -m pip install mcp-tool-card-linter
+```
+
+Run directly from a source checkout without installing the package:
 
 ```bash
 PYTHONPATH=src python3 -m mcp_tool_card_linter lint \

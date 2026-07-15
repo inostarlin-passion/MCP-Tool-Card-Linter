@@ -1,6 +1,6 @@
 # 测试报告
 
-测试日期：2026-07-14。版本：1.0.0。
+测试日期：2026-07-15。版本：1.0.0。
 
 ## 环境
 
@@ -15,13 +15,13 @@
 
 | 验收项 | 实测结果 |
 | --- | --- |
-| 全部分层测试 | 143 tests；141 passed、2 platform skips、0 failed；41.678 s |
+| 全部分层测试 | 143 tests；141 passed、2 platform skips、0 failed；41.628 s |
 | branch coverage | 5,084 statements、2,006 branches；75.81%，通过 75% gate |
 | 规则准确率 | 12 cases、21 explicitly-labelled pairs；TP 8、FP 0、TN 13、FN 0；precision/recall/F1 = 1.0；通过 0.95/0.95 gate |
 | 确定性 fuzz | 500 个 bounded JSON round trips、5 个非法 JSON extensions、300 个 mutated tool shapes；全部通过 |
 | mutation | 6 个安全输入 mutation operators 均被预期 rule 杀死 |
-| soak | 40 次 stdio server start/discover/cleanup；无线程或 descriptor 累积；0.907 test seconds |
-| 性能 | 2,000 cards；规则计算 0.4048 s，peak 7.81 MiB；通过 `<10 s`/`<128 MiB` |
+| soak | 40 次 stdio server start/discover/cleanup；无线程或 descriptor 累积；0.927 test seconds |
+| 性能 | 2,000 cards；规则计算 0.4047 s，peak 7.81 MiB；通过 `<10 s`/`<128 MiB` |
 | 可复现构建 | 同一 source tree/`SOURCE_DATE_EPOCH` 两次构建，wheel 与 sdist 分别 `cmp` 完全相同 |
 | clean install | wheel 与 sdist 均在新 venv 安装成功；version/lint/contract/rules/evaluate smoke 全通过 |
 | 静态质量 | Ruff、strict mypy（native/win32/linux）、compileall、pip check、diff check、workflow YAML parse 全通过 |
@@ -50,7 +50,7 @@ PYTHONWARNINGS=error::ResourceWarning PYTHONPATH=src \
 ```
 
 ```text
-Ran 143 tests in 41.678s
+Ran 143 tests in 41.628s
 OK (skipped=2)
 TOTAL 5084 statements, 1045 missed, 2006 branches, 514 partial, 75.81%
 ```
@@ -68,7 +68,7 @@ TOTAL 5084 statements, 1045 missed, 2006 branches, 514 partial, 75.81%
 | ctypes 调用未声明完整原型 | foreign function 的默认转换不构成 Win64 HANDLE 契约 | 为 create/set/assign/close 显式声明 `argtypes`/`restype` |
 | Job 配置异常只 kill/wait | 三条 `PIPE` 对象仍持有 descriptor，触发 `ResourceWarning` | 失败回滚在 kill/wait 后逐一关闭 stdin/stdout/stderr，并有异常注入测试 |
 
-本机替身测试已验证结构布局、information class 9、精确 flags/fields、64-bit-safe API 签名和失败清理；真实 Windows 测试还增强为“关闭最后一个 Job handle 后子进程必须终止”。由于本报告对应未推送工作树，不能把旧 run 的红色状态表述为已在远端转绿；下一次推送后才可由 4 个 Windows matrix job 完成真实复验。
+本机替身测试验证了结构布局、information class 9、精确 flags/fields、64-bit-safe API 签名和失败清理；真实 Windows 测试还增强为“关闭最后一个 Job handle 后子进程必须终止”。[修复后的 run 29311329892](https://github.com/inostarlin-passion/MCP-Tool-Card-Linter/actions/runs/29311329892) 已在 Windows + Python 3.11/3.12/3.13/3.14 全部通过，且同一 run 的其他 13 个 job 也全部成功。
 
 ## v1.0 专项测试
 
@@ -105,12 +105,13 @@ TOTAL 5084 statements, 1045 missed, 2006 branches, 514 partial, 75.81%
 | `git diff --check` | 通过 |
 | `python -m pip check` | `No broken requirements found` |
 | workflow YAML parse | CI/release 均通过 Ruby Psych 解析 |
-| wheel | 106,693 bytes；SHA-256 `652402c17b8c60acb2c185229ef26e447b4fda571dfe0d6dc96d5ef39e934dda` |
-| sdist | 103,662 bytes；SHA-256 `29acb24a0969072b635d9695459d74cdb9c7e3407f18b02b1d5e23396eb061fc` |
+| wheel | 两次候选构建逐字节一致；Twine 与 `check-wheel-contents` 通过 |
+| sdist | 两次候选构建逐字节一致；Twine 通过 |
 | clean wheel install | 1.0.0、good fixture lint、`contract` 通过 |
 | clean sdist install | rule catalog 与 accuracy 0.95/0.95 gate 通过 |
+| 运行时依赖审计 | `pip-audit --strict` 报告无已知漏洞 |
 
-这些 SHA-256 是当前未提交工作树在 macOS 上的验收构建，用于证明两次本地构建相同；正式发布必须使用 release workflow 生成的新校验和、GitHub attestations 与 PyPI PEP 740 attestations，不能把这里的临时 hash 当作已发布制品身份。
+本地候选构建只用于证明同一 source tree/`SOURCE_DATE_EPOCH` 的两次构建一致。正式制品身份以 release workflow 发布的 `SHA256SUMS`、GitHub attestations 与 PyPI PEP 740 attestations 为准。
 
 ## CI 与发布门
 
@@ -122,7 +123,7 @@ TOTAL 5084 statements, 1045 missed, 2006 branches, 514 partial, 75.81%
 - `mcp-conformance`：锁定依赖的官方 runner 执行 2025-11-25 initialize 与 SSE retry 场景。
 - tag release：版本/tag 一致性、reproducible build、CycloneDX SBOM、SHA-256、GitHub provenance/SBOM attestations、PyPI Trusted Publishing/PEP 740、GitHub Release。
 
-本地只能验证工作流语法和对应命令；GitHub 托管 runner、OIDC、PyPI environment、attestation 与 immutable-release repository setting 必须在推送/tag 后由远端执行，不能在本报告中声称已运行。
+最新主分支 run 已在 GitHub 托管的 Ubuntu/macOS/Windows 与 Python 3.11–3.14 上全绿。`pypi` environment 已配置所有者审批和 `v*` tag 限制，PyPI pending Trusted Publisher 已精确绑定仓库、`release.yml` 与该 environment。Tag 专用的 OIDC 上传、GitHub attestation、SBOM attestation 与 Release 创建仍必须由正式 tag run 实证。
 
 ## 回归范围
 
