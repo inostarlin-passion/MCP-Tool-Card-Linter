@@ -29,6 +29,13 @@ dependencies = [
   "rfc8785>=0.1.4,<1",
 ]
 
+[project.urls]
+Homepage = "https://github.com/inostarlin-passion/MCP-Tool-Card-Linter"
+Repository = "https://github.com/inostarlin-passion/MCP-Tool-Card-Linter.git"
+Issues = "https://github.com/inostarlin-passion/MCP-Tool-Card-Linter/issues"
+Changelog = "https://github.com/inostarlin-passion/MCP-Tool-Card-Linter/blob/main/CHANGELOG.md"
+"Security Policy" = "https://github.com/inostarlin-passion/MCP-Tool-Card-Linter/security/policy"
+
 [project.optional-dependencies]
 dev = [
   "build>=1.2,<2",
