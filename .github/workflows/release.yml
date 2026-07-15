@@ -41,6 +41,24 @@ jobs:
           cyclonedx-py environment product-venv/bin/python \
             --pyproject pyproject.toml --mc-type library --output-reproducible \
             --output-format JSON --output-file release/sbom.cdx.json
+          python - <<'PY'
+          import json
+          import os
+          import uuid
+          from pathlib import Path
+
+          path = Path("release/sbom.cdx.json")
+          sbom = json.loads(path.read_text(encoding="utf-8"))
+          identity = (
+              f"https://github.com/{os.environ['GITHUB_REPOSITORY']}"
+              f"@{os.environ['GITHUB_SHA']}#{os.environ['GITHUB_REF_NAME']}"
+          )
+          sbom["serialNumber"] = f"urn:uuid:{uuid.uuid5(uuid.NAMESPACE_URL, identity)}"
+          path.write_text(
+              json.dumps(sbom, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
           cd dist-packages
           sha256sum * > ../release/SHA256SUMS
       - name: Sign and attest package provenance
@@ -48,7 +66,7 @@ jobs:
         with:
           subject-path: dist-packages/*
       - name: Bind the CycloneDX SBOM to release artifacts
-        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:
           subject-path: dist-packages/*
           sbom-path: release/sbom.cdx.json
